@@ -695,5 +695,5 @@ The warnings do not represent actual bugs.
 
 ---
 
-*HUNTER Project Documentation — generated April 2026*
+*HUNTER Project Documentation*
 
