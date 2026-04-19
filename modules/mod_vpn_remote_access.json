@@ -1,0 +1,57 @@
+{
+  "id": "mod_vpn_remote_access",
+  "name": "VPN and Remote Access Hunt",
+  "category": "Network",
+  "tags": ["VPN", "Remote Access", "Pulse Secure", "Fortinet", "Citrix", "RDP", "ZTNA"],
+  "author": "Network Defense Team",
+  "last_updated": "2025-03-22",
+  "priority": "Critical",
+  "estimated_hours": 3,
+  "mitre_techniques": ["T1133", "T1078", "T1021.001", "T1098"],
+  "prerequisites": ["VPN gateway log access (authentication and session logs)", "RDP gateway or bastion host logs available", "SIEM with geolocation enrichment capability", "DNS/DHCP logs correlated with VPN session IP assignments"],
+  "required_tools": ["Splunk or Elastic for VPN log analysis", "MaxMind GeoIP or equivalent enrichment", "SIEM for correlation across VPN, AD, and endpoint data", "Shodan (for external VPN exposure assessment)"],
+  "references": [
+    "https://attack.mitre.org/techniques/T1133/",
+    "https://www.cisa.gov/news-events/cybersecurity-advisories/aa20-073a",
+    "https://attack.mitre.org/techniques/T1021/001/"
+  ],
+  "hunt_actions": [
+    {
+      "title": "Unauthorized VPN Authentication",
+      "actions": [
+        "Hunt for successful VPN logins from atypical geographies: `index=vpn action=authenticated | iplocation src_ip | stats count by user, Country, src_ip | where Country NOT IN ('United States','<approved_countries>') | sort -count` — any authenticated session from an unexpected country for a given user must be correlated with HR records, travel plans, and the user's normal geographic baseline.",
+        "Detect impossible travel (concurrent sessions from distant geos): Splunk: `index=vpn action=authenticated | iplocation src_ip | sort user, _time | streamstats current=f last(_time) as prev_time last(lat) as prev_lat last(lon) as prev_lon by user | eval timedelta=(_time - prev_time)/3600 | eval dist=acos(sin(lat*pi()/180)*sin(prev_lat*pi()/180)+cos(lat*pi()/180)*cos(prev_lat*pi()/180)*cos((lon-prev_lon)*pi()/180))*6371 | where dist/timedelta > 900 | table user, _time, src_ip, Country, timedelta, dist` — a travel speed > 900 km/h between sessions is physically impossible.",
+        "Identify accounts with excessive failed VPN authentication attempts: `index=vpn action=failed | stats count as failures by user, src_ip | where failures > 20 | sort -failures` — distinguish between locked accounts (genuine user issues) and targeted brute force; cross-reference src_ip against threat intel feeds.",
+        "Hunt for VPN logins from Tor exit nodes or anonymizing proxies: Enrich src_ip against known Tor exit node list (updated daily at https://check.torproject.org/torbulkexitlist). Splunk: `index=vpn action=authenticated | lookup tor_exit_nodes src_ip OUTPUT is_tor | where is_tor='yes' | table _time, user, src_ip`"
+      ]
+    },
+    {
+      "title": "Anomalous Session Behavior Post-Authentication",
+      "actions": [
+        "Detect VPN sessions active outside business hours for privileged accounts: Splunk: `index=vpn action=authenticated | eval hour=strftime(_time,'%H') | where (hour < 6 OR hour > 22) | lookup privileged_accounts user OUTPUT is_privileged | where is_privileged='yes' | table _time, user, src_ip, hour` — define privileged accounts list to include Domain Admins, database admins, and C-suite.",
+        "Hunt for data volume anomalies during VPN sessions: `index=vpn | stats sum(bytes_in) as total_in, sum(bytes_out) as total_out, avg(session_duration) as avg_dur by user | where total_out > 1073741824 | sort -total_out` — over 1 GB outbound from a single user in a VPN session warrants immediate investigation; correlate with DLP alerts and file server access logs.",
+        "Identify VPN sessions terminating with immediate re-authentication (session handoff): `index=vpn | sort user, _time | streamstats current=f last(_time) as prev_end by user | eval gap=(_time - prev_end) | where gap < 30 | table user, _time, prev_end, gap, src_ip` — rapid session churn (< 30 seconds between disconnect and reconnect) from different IPs may indicate session hijacking or token reuse.",
+        "Detect use of shared VPN credentials across multiple source IPs simultaneously: `index=vpn action=authenticated | stats dc(src_ip) as unique_ips count by user, _time span=15m | where unique_ips > 1 | sort -unique_ips` — shared credentials are a policy violation and security risk; each concurrent session from a different IP indicates credential sharing or compromise."
+      ]
+    },
+    {
+      "title": "RDP Exposure and Abuse",
+      "actions": [
+        "Identify RDP (port 3389) exposed to the internet: `nmap -p 3389 --open -iL internal_ip_list.txt -oG - | grep '3389/open'` — also run: `shodan search 'port:3389 org:<your_org_name>' --key <api_key>` to identify any internet-facing RDP services from the attacker's perspective.",
+        "Hunt for RDP brute force: Windows Event 4625 (failed logon, type 10 = RemoteInteractive). Splunk: `index=windows EventCode=4625 Logon_Type=10 | stats count as failures, dc(TargetUserName) as unique_users by IpAddress | where failures > 50 | sort -failures` — distinguish external IPs (internet brute force) from internal IPs (lateral movement via RDP).",
+        "Detect RDP session shadowing or unauthorized screen monitoring: Windows Event 4778 (session reconnected to winstation). Splunk: `index=windows EventCode=4778 | where NOT match(AccountName,'SYSTEM|NETWORK SERVICE') | table _time, host, AccountName, ClientName, ClientAddress` — session reconnects from unexpected workstations may indicate shadowing or pass-the-hash-based RDP access.",
+        "Hunt for RDP tunneling over non-standard ports: Sysmon Event 3 with DestinationPort != 3389 but Image containing `mstsc.exe` or reverse shell patterns. Also check: `netstat -ano | findstr ':3389'` on a live system, and cross-reference OwningProcess PID against running process list to detect port forwarding tools (plink, chisel, ngrok) masking RDP traffic."
+      ]
+    }
+  ],
+  "questions": [
+    "Are VPN authentication logs (including authentication success, failure, username, source IP, session start/stop, and bytes transferred) forwarded to the SIEM with full fidelity and no sampling?",
+    "Is multi-factor authentication enforced for all VPN user accounts without exception, and has this been verified through a test of accounts that may have been explicitly excluded from MFA enforcement?",
+    "What is the VPN gateway software and version, and has it been assessed against current CVE listings for known vulnerabilities (e.g., Fortinet CVE-2022-40684, Ivanti CVE-2024-21887)?",
+    "Are split-tunnel VPN configurations used, and if so, is the set of networks routed through the VPN documented, formally risk-accepted, and monitored for traffic that should traverse the tunnel but does not?",
+    "Is RDP access to internal systems restricted to authorized jump servers or VDI solutions only, with direct RDP connections to endpoints blocked at the network perimeter and enforced via host-based firewall?",
+    "Are VPN session logs correlated with Active Directory authentication events to detect the use of stolen credentials authenticated via VPN but inconsistent with the legitimate user's workstation login?",
+    "Is there an automated alert configured to detect and respond to impossible travel scenarios (logins from geographically distant IPs within an impossibly short time window) for VPN and remote access sessions?",
+    "Are inactive VPN accounts (no successful authentication in > 90 days) automatically disabled or removed, and is there a formal offboarding process that includes immediate VPN credential revocation upon employee departure?"
+  ]
+}

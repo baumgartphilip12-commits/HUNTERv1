@@ -1,0 +1,55 @@
+{
+  "id": "mod_keycloak",
+  "name": "Keycloak Identity Hunt",
+  "category": "Identity",
+  "tags": ["Keycloak", "IAM", "SSO", "OIDC", "SAML"],
+  "author": "Identity Security Team",
+  "last_updated": "2025-02-28",
+  "priority": "Critical",
+  "estimated_hours": 3,
+  "mitre_techniques": ["T1078", "T1556", "T1606"],
+  "prerequisites": ["Keycloak admin read-only access (view-realm, view-users roles)", "Event log export enabled in realm settings", "Realm name(s) documented and confirmed with system owner"],
+  "required_tools": ["Keycloak Admin REST API (curl or Postman)", "ELK Stack or Splunk with Keycloak event log index", "kcadm.sh CLI (bundled with Keycloak)"],
+  "references": [
+    "https://www.keycloak.org/docs/latest/server_admin/",
+    "https://attack.mitre.org/techniques/T1556/"
+  ],
+  "hunt_actions": [
+    {
+      "title": "Authentication Anomaly Detection",
+      "actions": [
+        "Pull failed login events exceeding threshold: `curl -H 'Authorization: Bearer <token>' 'https://<keycloak>/admin/realms/<realm>/events?type=LOGIN_ERROR&max=1000' | jq '.[] | {time, ipAddress, details}'` — flag any username with > 10 failures in 60 minutes.",
+        "Identify service accounts using interactive browser sessions: In Keycloak Admin Console navigate to Realm > Events > Login Events. Filter by clientId matching known service clients (e.g., internal-api, backend-svc) and look for session_type=browser rather than expected service_account.",
+        "Detect password spray across accounts: Splunk query: `index=keycloak sourcetype=keycloak:events type=LOGIN_ERROR | bin _time span=10m | stats dc(userId) as unique_users count by _time, ipAddress | where unique_users > 20` — indicates spraying from single source IP.",
+        "Hunt for token refresh anomalies: `curl -H 'Authorization: Bearer <admin_token>' 'https://<keycloak>/admin/realms/<realm>/sessions' | jq '.[] | select(.lastAccess < (.start + 60)) | {id, userId, ipAddress, lastAccess}'` — refresh tokens used well after session start without corresponding interactive use."
+      ]
+    },
+    {
+      "title": "Admin Privilege Escalation",
+      "actions": [
+        "List all users with realm-admin or manage-users roles: `./kcadm.sh get-roles --target-realm <realm> --rolename realm-admin --users` and `./kcadm.sh get-roles --target-realm <realm> --rolename manage-users --users` — compare output against approved admin list.",
+        "Identify recent role mapping changes: In Keycloak Admin Console go to Realm > Events > Admin Events, filter Operation Type = CREATE or UPDATE, Resource Type = ROLE_MAPPING. Export and review all events within the hunt window.",
+        "Detect new identity providers added to realms: `curl -H 'Authorization: Bearer <token>' 'https://<keycloak>/admin/realms/<realm>/identity-provider/instances' | jq '.[] | {alias, providerId, enabled, config.authorizationUrl}'` — compare against authorized IdP baseline.",
+        "Review client scope changes granting elevated permissions: `curl -H 'Authorization: Bearer <token>' 'https://<keycloak>/admin/realms/<realm>/client-scopes' | jq '.[] | {id, name, protocol}' ` then for each scope: `curl .../client-scopes/<id>/scope-mappings/realm` and check for recently added realm-level roles."
+      ]
+    },
+    {
+      "title": "Session Hijacking Indicators",
+      "actions": [
+        "Hunt for sessions where the IP address changed mid-session: Cross-reference Keycloak access event logs (type=CODE_TO_TOKEN and type=REFRESH_TOKEN) for the same sessionId but differing ipAddress. Splunk: `index=keycloak | stats values(ipAddress) as ips by sessionId | where mvcount(ips) > 1`",
+        "Identify offline tokens that have never been revoked: `curl -H 'Authorization: Bearer <token>' 'https://<keycloak>/admin/realms/<realm>/sessions/offline' | jq '.[] | {id, userId, ipAddress, start, lastAccess}'` — flag sessions with lastAccess > 90 days and no revocation event.",
+        "Detect concurrent sessions from geographically disparate IPs: `curl -H 'Authorization: Bearer <token>' 'https://<keycloak>/admin/realms/<realm>/users/<userId>/sessions' | jq '.[]'` for high-value accounts — look for multiple active sessions with different geolocations active simultaneously within the same hour."
+      ]
+    }
+  ],
+  "questions": [
+    "What version of Keycloak (or Red Hat SSO) is currently deployed, and has it been patched to the latest security release within the last 90 days?",
+    "Are Keycloak admin and user event logs forwarded to the SIEM in real time, and are both LOGIN_ERROR and ADMIN event types captured?",
+    "How many realms are configured, which are classified as production, and is there a current architecture diagram documenting realm relationships?",
+    "Is brute-force protection enabled on all production realms with lockout thresholds documented and tested (Realm Settings > Security Defenses > Brute Force Detection)?",
+    "Which external identity providers are integrated (LDAP, Active Directory, SAML IdP, OIDC), and has each been reviewed for appropriate attribute mapping and scope restrictions?",
+    "Are offline tokens enabled for any client applications, and if so, what is the maximum offline session idle and max offline session lifespan configured?",
+    "Which accounts hold the realm-admin or manage-realm roles, and have those accounts been formally reviewed and recertified within the past 90 days?",
+    "Is the Keycloak administration console (/auth/admin) restricted to internal networks or VPN only, and is this enforced at the network layer (firewall/reverse proxy)?"
+  ]
+}

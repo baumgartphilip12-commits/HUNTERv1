@@ -1,0 +1,56 @@
+{
+  "id": "mod_web_application",
+  "name": "Web Application Hunt",
+  "category": "Network",
+  "tags": ["Web", "Apache", "Nginx", "WAF", "SQLi", "Webshell"],
+  "author": "AppSec Hunt Team",
+  "last_updated": "2025-02-15",
+  "priority": "High",
+  "estimated_hours": 4,
+  "mitre_techniques": ["T1190", "T1505.003", "T1059.007", "T1071.001"],
+  "prerequisites": ["Web server access logs available for the hunt window", "WAF logs accessible (if deployed)", "Read access to web root directories on target servers", "Application error logs available"],
+  "required_tools": ["GoAccess or AWStats for log analysis", "ClamAV or YARA for webshell scanning", "Splunk with web log sourcetype", "grep / awk / jq for log parsing"],
+  "references": [
+    "https://attack.mitre.org/techniques/T1505/003/",
+    "https://github.com/BeichenDream/Godzilla",
+    "https://www.cisa.gov/sites/default/files/publications/CISA-MS-ISAC_Ransomware-Guide_S508C.pdf"
+  ],
+  "hunt_actions": [
+    {
+      "title": "Webshell Detection",
+      "actions": [
+        "Scan web root directories for known webshell signatures using YARA: `yara -r /path/to/webshell_rules.yar /var/www/html/ 2>/dev/null` — use Neo23x0's webshell YARA ruleset (https://github.com/Neo23x0/signature-base). Also: `find /var/www -name '*.php' -newer /var/www/index.php -ls 2>/dev/null | sort -k8` for recently modified PHP files.",
+        "Detect webshell execution patterns in access logs: `grep -E '(cmd|exec|shell|passthru|eval|base64_decode|system|phpinfo|assert)' /var/log/nginx/access.log | grep -v '404\\|301\\|302' | awk '{print $1, $7, $9}' | sort | uniq -c | sort -rn | head -20` — encoded POST body parameters are harder to detect; also check for abnormally large POST requests to static file extensions (.jpg, .png, .pdf).",
+        "Hunt for one-line PHP webshells using ClamAV: `clamscan -r --infected --no-summary /var/www/html/ 2>/dev/null | grep -v ': OK'` — ensure ClamAV database is freshly updated with `freshclam` before scanning. Flag any PHP file under 5KB in an upload directory.",
+        "Identify base64-encoded payloads in web requests: `grep -a 'base64' /var/log/nginx/access.log | awk '{print $1, $6, $7}' | grep 'POST\\|PUT' | sort | uniq -c | sort -rn | head -30` — also decode suspicious values: `echo '<base64_string>' | base64 -d` to inspect payload content."
+      ]
+    },
+    {
+      "title": "Exploitation Attempt Detection",
+      "actions": [
+        "Hunt for SQL injection attempts in web logs: `grep -E \"('|--|;|UNION|SELECT|INSERT|DROP|xp_cmdshell|EXEC|CAST|CONVERT|CHAR|NCHAR|VARCHAR|WAITFOR)\" /var/log/apache2/access.log | grep -v '404' | awk '{print $1, $7, $9}' | sort | uniq -c | sort -rn | head -20` — URL-decode the URI before analysis: `python3 -c \"import sys,urllib.parse; [print(urllib.parse.unquote(l)) for l in sys.stdin]\"`",
+        "Detect directory traversal and LFI/RFI attempts: `grep -E '(\\.\\./|%2e%2e%2f|%252e%252e%252f|/etc/passwd|/proc/self|php://|expect://)' /var/log/nginx/access.log | awk '{print $1, $6, $7, $9}' | sort | uniq -c | sort -rn | head -20`",
+        "Identify server-side template injection (SSTI) attempts: `grep -E '(\\{\\{|\\{%|\\$\\{|#\\{|<%|\\[\\[)' /var/log/apache2/access.log | grep -vE '404|301|302|\\.(js|css|ico)' | awk '{print $1, $6, $7}' | sort | uniq -c | sort -rn`",
+        "Review WAF block and pass-through logs: In your WAF portal (e.g., ModSecurity, AWS WAF, Cloudflare), filter for RuleId matches within the OWASP Core Rule Set (CRS). Specifically check for rules 930100-930130 (LFI), 931100-931130 (RFI), 941100-941999 (XSS), 942100-942999 (SQLi) that were ALLOWED (not blocked) — these represent bypass attempts that succeeded past the WAF."
+      ]
+    },
+    {
+      "title": "Post-Exploitation Web Activity",
+      "actions": [
+        "Detect unusual outbound connections from the web server: `ss -tnp | grep -E ':(80|443|8080|8443)' | awk '{print $5}'` for live connections, and `netstat -antp 2>/dev/null | grep ESTABLISHED | grep -v ':80\\|:443' | grep httpd\\|nginx\\|apache` — web server processes should not be initiating outbound connections.",
+        "Hunt for command execution output in HTTP responses: `grep -E 'HTTP/1\\.[01]\" (200|201|204)' /var/log/nginx/access.log | awk '{print $7, $10}' | sort -k2 -rn | head -30` — unusually large response sizes (> 10,000 bytes) to POST requests on static pages indicate data retrieval via webshell.",
+        "Identify cron jobs or new files created by web server user: `find / -user www-data -o -user apache -o -user nginx -type f -newer /var/log/dpkg.log -ls 2>/dev/null | grep -v '/proc\\|/sys\\|/var/log'` — and `crontab -u www-data -l 2>/dev/null` — the web server user should not own any files outside the web root or have any scheduled tasks."
+      ]
+    }
+  ],
+  "questions": [
+    "Are web server access logs (Apache/Nginx) retained for the full hunt window, and do they include the full request URI, response code, response size, and X-Forwarded-For header if behind a load balancer?",
+    "Is a Web Application Firewall (WAF) deployed in front of all public-facing applications, and are WAF logs (including both blocked and allowed request decisions) forwarded to the SIEM?",
+    "Is there a current, complete inventory of all web applications and services exposed on the network perimeter, including version information and responsible application owners?",
+    "Are web application dependencies (frameworks, libraries, CMS plugins) tracked in a software bill of materials (SBOM), and are vulnerable versions identified via automated scanning (e.g., OWASP Dependency-Check)?",
+    "Are upload directories and writable web root paths isolated and restricted from server-side script execution (e.g., php_flag engine off in .htaccess, or location block in Nginx config)?",
+    "Is file integrity monitoring (FIM) configured specifically on the web root directories to detect unauthorized file creation or modification in real time or near-real time?",
+    "Are web server processes running under a dedicated, least-privilege service account with no interactive login shell, no sudo rights, and restricted filesystem write permissions?",
+    "Are error logs (PHP error_log, application stack traces) suppressed from HTTP responses in the production environment to prevent information disclosure to potential attackers?"
+  ]
+}

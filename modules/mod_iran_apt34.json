@@ -1,0 +1,68 @@
+{
+  "id": "mod_iran_apt34",
+  "name": "Iran APT34 — Helix Kitten / DNSpionage",
+  "category": "APT",
+  "tags": ["Iran", "APT34", "OilRig", "DNSpionage", "Helix Kitten", "DNS Tunneling"],
+  "author": "Threat Intelligence Team",
+  "last_updated": "2025-04-01",
+  "priority": "Critical",
+  "estimated_hours": 5,
+  "mitre_techniques": ["T1071.004", "T1568.002", "T1059.005", "T1078.002", "T1560.001", "T1048.003"],
+  "prerequisites": [
+    "DNS query logs with query type (A, TXT, CNAME, MX) available in SIEM",
+    "Passive DNS or DNS resolver log access for hunt window",
+    "Network flow data covering internal-to-internet communications",
+    "VPN and remote access authentication logs available"
+  ],
+  "required_tools": [
+    "Zeek with DNS log parsing (dns.log)",
+    "RITA for DNS tunneling analysis",
+    "Splunk or Elastic with DNS + proxy + VPN index",
+    "dnstwist or PassiveDNS for domain analysis"
+  ],
+  "references": [
+    "https://attack.mitre.org/groups/G0049/",
+    "https://blog.talosintelligence.com/dnspionage-campaign-targets-middle-east/",
+    "https://www.fireeye.com/blog/threat-research/2019/01/apt34-new-deployment-of-apt34-tools.html"
+  ],
+  "hunt_actions": [
+    {
+      "title": "DNS Tunneling and C2 via DNS (DNSpionage)",
+      "actions": [
+        "Hunt for high-volume DNS TXT queries indicative of DNSpionage C2: `index=dns query_type=TXT | stats count as txt_count, dc(query) as unique_domains by src_ip | where txt_count > 50 | sort -txt_count` — DNSpionage uses DNS TXT records to pass commands; compare queried domains against Cisco Umbrella or Passive DNS for registration age and category",
+        "Detect DNS subdomain exfiltration (long encoded subdomains): In Zeek dns.log: `cat /path/to/dns.log | zeek-cut id.orig_h query | awk '{ split($2,a,\".\"); for(i in a) if(length(a[i])>20) print $0 }' | sort | uniq -c | sort -rn | head -30` — APT34 encodes stolen data in subdomain labels; labels > 20 chars are anomalous"
+      ]
+    },
+    {
+      "title": "VALUEVAULT and LONGWATCH Credential Stealer Artifacts",
+      "actions": [
+        "Hunt for VALUEVAULT execution (Windows Credential Manager dumper): `index=windows EventCode=4688 CommandLine=*vault* OR (CommandLine=*vaultcmd* AND CommandLine=*/list*) | table _time, host, SubjectUserName, CommandLine` — VALUEVAULT exports Windows Vault credentials to a file; also look for: `Get-ChildItem -Path $env:APPDATA\\Microsoft\\Vault\\ -Recurse` access events in PowerShell logs",
+        "Detect LONGWATCH keylogger artifacts (writes to log files in temp directories): `index=windows EventCode=11 (TargetFilename=*\\Temp\\*.log OR TargetFilename=*\\AppData\\Local\\Temp\\*.dat) | stats count by host, TargetFilename | sort -count` (Sysmon File Create Event 11) — LONGWATCH logs keystrokes to a hidden file; any process repeatedly writing small amounts to a temp .log file is suspicious"
+      ]
+    },
+    {
+      "title": "Living-off-the-Land and VBScript Abuse",
+      "actions": [
+        "Hunt for APT34's PICKPOCKET and HYPERDRIVE VBScript/macro loaders: `index=windows EventCode=4688 (Image=*wscript.exe* OR Image=*cscript.exe*) ParentImage IN (*WINWORD.EXE*,*EXCEL.EXE*,*OUTLOOK.EXE*) | table _time, host, ParentImage, CommandLine` — VBScript droppers launching from Office are a primary APT34 delivery mechanism",
+        "Detect scheduled task creation used for persistence (APT34 pattern): `index=windows EventCode=4698 | rex field=TaskContent '<Command>(?P<cmd>[^<]+)' | where match(cmd, 'wscript|cscript|powershell|mshta|regsvr32') | table _time, host, TaskName, cmd, SubjectUserName`"
+      ]
+    },
+    {
+      "title": "Exchange and OWA Credential Harvesting",
+      "actions": [
+        "Hunt for suspicious OWA login patterns (APT34 targets Exchange for credential harvesting and email access): `index=exchange OR index=iis cs-uri-stem=*/owa/* sc-status=200 | stats dc(c-ip) as unique_ips, count as logins by cs-username | where unique_ips > 5 | sort -unique_ips` — a single account authenticating from many IPs to OWA indicates credential stuffing or account compromise",
+        "Detect Exchange web shell installation (APT34 deploys web shells to Exchange servers): `index=iis cs-uri-stem IN (*/owa/*,*/ews/*,*/autodiscover/*) sc-status=200 cs-method=POST | stats count by cs-uri-stem, c-ip | where count > 20 | sort -count` — POST requests to static Exchange paths are indicators; also run: `Get-ChildItem -Path 'C:\\inetpub\\wwwroot\\aspnet_client\\' -Recurse -Filter '*.aspx' | Where-Object { $_.CreationTime -gt (Get-Date).AddDays(-30) }`"
+      ]
+    }
+  ],
+  "questions": [
+    "Is DNS query logging enabled on all internal resolvers and forwarded to the SIEM, including query type (TXT, MX, A, CNAME) and the full query string including all subdomain labels?",
+    "Is the organization's Exchange or Office 365 environment configured to block legacy authentication protocols (Basic Auth, NTLM to OWA), and is this verified in current sign-in logs?",
+    "Are external DNS resolvers restricted such that internal hosts can only query approved internal resolvers (no direct port 53 access to internet), enforced via firewall egress rules?",
+    "Are Outlook Web Access (OWA) and Exchange Web Services (EWS) endpoints protected by multi-factor authentication and monitored for authentication anomalies?",
+    "Is there a passive DNS or DNS history capability to identify recently registered domains mimicking the organization's name or those of its partners and supply chain?",
+    "Are VBScript and JScript execution via wscript.exe and cscript.exe blocked for standard user accounts via AppLocker or Windows Defender Application Control (WDAC) policy?",
+    "Has the organization's Exchange server been assessed for web shell presence in the aspnet_client, OWA, and EWS directories within the last 90 days?",
+    "Are threat intelligence feeds specific to APT34/OilRig IOCs integrated into the SIEM, email gateway, and DNS filtering platform to enable automated detection?"
+  ]
+}

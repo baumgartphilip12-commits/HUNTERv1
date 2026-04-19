@@ -1,0 +1,16 @@
+{
+  "id": "mod_dsad_2fd67c",
+  "name": "dsad",
+  "category": "Other",
+  "author": "Unknown",
+  "last_updated": "2026-04-14",
+  "priority": "Medium",
+  "estimated_hours": 1,
+  "mitre_techniques": [],
+  "prerequisites": [],
+  "required_tools": [],
+  "tags": [],
+  "references": [],
+  "hunt_actions": [],
+  "questions": []
+}

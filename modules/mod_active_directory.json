@@ -1,0 +1,56 @@
+{
+  "id": "mod_active_directory",
+  "name": "Active Directory Domain Hunt",
+  "category": "Identity",
+  "tags": ["Active Directory", "Kerberos", "LDAP", "Domain Controller", "GPO"],
+  "author": "Red Cell Team",
+  "last_updated": "2025-03-20",
+  "priority": "Critical",
+  "estimated_hours": 6,
+  "mitre_techniques": ["T1558", "T1003.003", "T1484", "T1207", "T1069"],
+  "prerequisites": ["Domain user account with read access to AD objects", "Access to Security event logs on Domain Controllers", "BloodHound or SharpHound collection authorized by system owner", "Network access to LDAP (port 389/636) and Kerberos (port 88)"],
+  "required_tools": ["BloodHound Community Edition with Neo4j", "PowerView / PowerSploit (authorized use)", "Impacket suite (secretsdump, GetUserSPNs — authorized use)", "Splunk with Windows DC Security log index"],
+  "references": [
+    "https://attack.mitre.org/techniques/T1558/",
+    "https://github.com/BloodHoundAD/BloodHound",
+    "https://adsecurity.org/"
+  ],
+  "hunt_actions": [
+    {
+      "title": "Kerberos Attack Detection",
+      "actions": [
+        "Hunt for Kerberoasting: Windows Security Event 4769 (Kerberos Service Ticket Request) with Ticket Encryption Type 0x17 (RC4-HMAC). Splunk: `index=windows EventCode=4769 TicketEncryptionType=0x17 ServiceName!=krbtgt ServiceName!=*$* | stats count by Account_Name, ServiceName, Client_Address | sort -count` — any non-krbtgt RC4 TGS request from a user account to a service account SPN is a Kerberoasting indicator.",
+        "Detect AS-REP Roasting (no pre-auth accounts): `Get-ADUser -Filter {DoesNotRequirePreAuth -eq $true} -Properties DoesNotRequirePreAuth,SamAccountName,DistinguishedName | Select SamAccountName, DistinguishedName | Export-Csv asrep_vulnerable.csv -NoTypeInformation` — any account in this list that is not explicitly approved is a finding.",
+        "Identify Golden/Silver Ticket indicators: Event 4769 with an unusual TGT lifetime or service tickets requested for non-existent services. Also look for Event 4624 type 3 logons where the AuthenticationPackageName is Kerberos but there is no corresponding 4768 (TGT request) in the DC logs within a reasonable window.",
+        "Hunt for DCSync activity: Splunk: `index=windows EventCode=4662 Properties IN ('*1131f70a*','*9923a32a*','*1131f70c*') ObjectType='%{19195a5b-6da0-11d0-afd3-00c04fd930c9}' | table _time, host, SubjectUserName, ObjectName` — these GUIDs represent DS-Replication-Get-Changes-All rights; any non-DC account generating these events is performing DCSync."
+      ]
+    },
+    {
+      "title": "Persistence and Privileged Account Abuse",
+      "actions": [
+        "Enumerate accounts with AdminSDHolder protection anomalies: `Get-ADUser -LDAPFilter '(adminCount=1)' -Properties adminCount,SamAccountName,MemberOf | Where-Object { $_.MemberOf -notmatch 'Domain Admins|Enterprise Admins|Schema Admins|Administrators|Account Operators|Backup Operators|Print Operators|Server Operators|Group Policy Creator Owners' } | Select SamAccountName, MemberOf | Export-Csv adminsdholder_anomalies.csv` — adminCount=1 on accounts not in protected groups indicates tampering.",
+        "Detect new Domain Admin or privileged group membership additions: Event 4728 (member added to security-enabled global group). Splunk: `index=windows EventCode=4728 Group_Name IN ('Domain Admins','Enterprise Admins','Schema Admins','Administrators') | table _time, host, Member_Name, Group_Name, SubjectUserName` — correlate with approved change tickets.",
+        "Hunt for unauthorized GPO creation or modification: `Get-GPO -All | Select DisplayName, Id, CreationTime, ModificationTime | Where-Object { $_.ModificationTime -gt (Get-Date).AddDays(-30) } | Export-Csv gpo_recent_changes.csv` — also check Event 5136 (directory service object modified) filtered to CN=Policies in the SYSVOL path.",
+        "Identify DCShadow attack indicators: `Get-ADDomainController -Filter * | Select Name,IPv4Address` — compare against the list of registered domain controllers via: `Get-ADObject -Filter {ObjectClass -eq 'nTDSDSA'} -SearchBase 'CN=Configuration,DC=domain,DC=com' | Select DistinguishedName` — any DC not in both lists may be a rogue DC used for DCShadow."
+      ]
+    },
+    {
+      "title": "Credential Access and Lateral Movement via AD",
+      "actions": [
+        "Hunt for NTDS.dit extraction attempts: Windows Event 7045 (VSS service start) followed by Event 4688 with CommandLine containing `ntdsutil`, `vssadmin`, `esentutl`, or `copy ntds.dit`. Splunk: `index=windows (EventCode=7045 ServiceName=VSS) OR (EventCode=4688 CommandLine IN (*ntdsutil*,*vssadmin create shadow*,*esentutl /y*,*copy*ntds.dit*)) | table _time, host, EventCode, CommandLine`",
+        "Detect pass-the-hash using Event 4624 Type 3 with NTLM: Splunk: `index=windows EventCode=4624 Logon_Type=3 AuthenticationPackageName=NTLM WorkstationName!=- | stats count by SubjectUserName, TargetUserName, WorkstationName, IpAddress | where count > 5 | sort -count` — NTLM network logons from workstation-to-workstation (not to a server) are primary PtH indicators.",
+        "Enumerate BloodHound attack paths to Domain Admin: After running SharpHound collection (`./SharpHound.exe -c All --zipfilename bh_collection.zip`), load into BloodHound and run built-in query 'Find Shortest Paths to Domain Admins'. Document all principals within 3 hops of DA — these represent high-value pivot targets requiring immediate remediation prioritization."
+      ]
+    }
+  ],
+  "questions": [
+    "What is the Active Directory domain and forest functional level, and are all domain controllers running a currently supported Windows Server version (2019 or 2022)?",
+    "Are Domain Controller Security event logs (minimum EID 4624, 4625, 4648, 4662, 4768, 4769, 4776, 7045) forwarded to the SIEM in real time, and does log retention cover the hunt window?",
+    "Is the Kerberos ticket encryption configured to enforce AES256 only (RC4 disabled), and has this been verified via `Get-ADDefaultDomainPasswordPolicy` and KDC event logs?",
+    "Are there any user accounts with the 'Do Not Require Kerberos Preauthentication' flag set (AS-REP Roasting vulnerability), and are they formally documented and justified?",
+    "Is BloodHound or a similar AD attack path analysis tool run on a scheduled basis (at least quarterly), and are identified critical paths to Domain Admin remediated within an SLA?",
+    "What is the current count of accounts in Domain Admins, Enterprise Admins, and Schema Admins groups, and are these accounts individually recertified on a quarterly basis?",
+    "Is the SYSVOL share audited for unauthorized script additions or modifications, and are GPO changes subject to a formal change control process with event log correlation?",
+    "Are privileged AD service accounts (e.g., accounts used for SQL, IIS, backup agents) managed with Group Managed Service Accounts (gMSA) or equivalent automatic password rotation?"
+  ]
+}

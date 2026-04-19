@@ -1,0 +1,68 @@
+{
+  "id": "mod_iran_apt39",
+  "name": "Iran APT39 — Remix Kitten / Chafer",
+  "category": "APT",
+  "tags": ["Iran", "APT39", "Remix Kitten", "Chafer", "MOIS", "PII Theft", "Telecom"],
+  "author": "Threat Intelligence Team",
+  "last_updated": "2025-04-01",
+  "priority": "Critical",
+  "estimated_hours": 5,
+  "mitre_techniques": ["T1071.001", "T1041", "T1560", "T1114.002", "T1583.001", "T1074.001"],
+  "prerequisites": [
+    "Email server logs (Exchange, O365) with mail flow details available",
+    "Proxy and web gateway logs with full URI and user-agent",
+    "File server and SharePoint/OneDrive access logs in SIEM",
+    "User behavior baseline for data access volumes"
+  ],
+  "required_tools": [
+    "Microsoft 365 Compliance Center for mail and file access audit",
+    "Splunk with Exchange, proxy, file access, and endpoint logs",
+    "DLP platform for data staging and exfil detection",
+    "Zeek or Arkime for C2 traffic analysis"
+  ],
+  "references": [
+    "https://attack.mitre.org/groups/G0087/",
+    "https://www.mandiant.com/resources/apt39-iranian-cyber-espionage-group-focused-on-personal-information",
+    "https://www.cisa.gov/news-events/cybersecurity-advisories/aa20-259a"
+  ],
+  "hunt_actions": [
+    {
+      "title": "Email and PII Data Collection (APT39 Focus)",
+      "actions": [
+        "Hunt for bulk email collection from Exchange or O365 (APT39 specifically targets PII for surveillance purposes): `Search-UnifiedAuditLog -RecordType ExchangeItem -Operations Copy,Move,HardDelete,SendAs -StartDate '2025-01-01' -EndDate '2025-04-01' | Where-Object { $_.UserIds -notmatch 'service|system|admin' } | Group-Object UserIds | Sort Count -Desc | Select -First 20`",
+        "Detect unauthorized mailbox export (PST/EML export via Compliance Center or MAPI): `Search-UnifiedAuditLog -Operations New-MailboxExportRequest,New-ComplianceSearchAction -StartDate '2025-01-01' | ConvertFrom-Json | Select CreationDate, UserIds, ResultCount, AuditData | Export-Csv mailbox_exports.csv` — any export request not tied to an approved eDiscovery or HR case is a critical finding"
+      ]
+    },
+    {
+      "title": "SEAWEED, CACHEMONEY, and Custom Implant Detection",
+      "actions": [
+        "Hunt for SEAWEED backdoor (HTTP-based RAT, uses HTTP GET with encoded params): `index=proxy cs-method=GET cs-uri-query=*id=* AND cs-uri-query=*cmd=* | stats count by src_ip, cs-uri-stem, cs-uri-query | sort -count` — SEAWEED uses predictable GET parameter patterns; also look for: responses with Content-Type text/plain of uniform small size (< 1KB) to the same URI repeatedly",
+        "Detect CACHEMONEY credential stealer artifacts: `index=windows EventCode=4688 CommandLine=*cachedump* OR (Image=*fgdump.exe* OR Image=*pwdump*) | table _time, host, SubjectUserName, CommandLine` — CACHEMONEY targets cached Windows credentials; also monitor: `index=windows EventCode=4663 ObjectServer='Security Account Manager' | stats count by SubjectUserName, host`"
+      ]
+    },
+    {
+      "title": "Data Staging and Exfiltration",
+      "actions": [
+        "Detect data staging in local temp or user directories (APT39 stages compressed archives before exfil): Sysmon Event 11 (File Create): `index=windows EventCode=11 (TargetFilename=*\\Temp\\*.zip OR TargetFilename=*\\Temp\\*.rar OR TargetFilename=*\\Temp\\*.7z OR TargetFilename=*\\AppData\\*.zip) | stats count by host, TargetFilename, Image | sort -count` — large archive creation in temp directories by non-archival processes is anomalous",
+        "Hunt for exfiltration to cloud storage or file sharing services (APT39 uses legitimate services as exfil channels): `index=proxy cs-uri-stem IN (*drive.google.com*,*onedrive.live.com*,*dropbox.com*,*mega.nz*,*wetransfer.com*,*gofile.io*) cs-method=POST | stats sum(sc-bytes) as bytes_sent by src_ip, cs-uri-stem | where bytes_sent > 52428800 | sort -bytes_sent` — > 50MB sent to personal cloud storage from a single host requires investigation"
+      ]
+    },
+    {
+      "title": "Telecom and Travel Sector Targeting Indicators",
+      "actions": [
+        "Hunt for reconnaissance against internal HR and travel systems (APT39 targets personnel data): `index=webserver cs-uri-stem IN (*hr.*,*travel.*,*payroll.*,*roster.*) cs-method=GET | stats dc(c-ip) as unique_ips, count by cs-uri-stem | where unique_ips > 20 | sort -unique_ips` — unusual numbers of unique IPs accessing HR web portals indicates scanning or unauthorized access",
+        "Detect LDAP queries targeting large sets of user objects (APT39 enumerates AD for personnel data): `index=windows EventCode=1644 | rex field=Message 'Filter: (?P<filter>[^\\n]+)' | rex field=Message 'Entries Returned: (?P<returned>\\d+)' | where tonumber(returned) > 500 | table _time, host, filter, returned` — Event 1644 logs expensive LDAP queries; returning > 500 user objects indicates bulk personnel enumeration"
+      ]
+    }
+  ],
+  "questions": [
+    "Are mailbox export and eDiscovery search capabilities in Exchange/O365 restricted to a limited set of authorized administrators, and are all export actions logged and reviewed?",
+    "Is there a Data Loss Prevention (DLP) policy configured to alert on bulk transfer of files containing PII (names, passport numbers, phone numbers, travel records) to external destinations?",
+    "Is access to HR systems, personnel rosters, travel booking systems, and payroll databases restricted to need-to-know and monitored for bulk data access or export attempts?",
+    "Are outbound connections to personal cloud storage services (Google Drive, Dropbox, Mega.nz, OneDrive personal) blocked or strictly monitored for endpoints handling sensitive personnel data?",
+    "Is the organization in a sector historically targeted by APT39 (telecommunications, travel, hospitality, high-tech), and has this been explicitly included in the current threat model?",
+    "Are proxy and web gateway logs retaining the full HTTP request URI, user-agent string, and response size for at least 90 days to support retrospective APT39 C2 traffic analysis?",
+    "Are Active Directory LDAP query logs (Event 1644, requires LDAP diagnostics enabled) or equivalent telemetry available to detect bulk user object enumeration?",
+    "Is there a process to correlate data staging events (large archive creation on endpoints) with subsequent network exfiltration attempts to the same source host within a defined time window?"
+  ]
+}

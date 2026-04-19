@@ -1,0 +1,56 @@
+{
+  "id": "mod_kubernetes",
+  "name": "Kubernetes / Container Hunt",
+  "category": "Cloud",
+  "tags": ["Kubernetes", "K8s", "Docker", "Container", "EKS", "AKS", "GKE"],
+  "author": "Platform Security Team",
+  "last_updated": "2025-03-05",
+  "priority": "High",
+  "estimated_hours": 5,
+  "mitre_techniques": ["T1610", "T1552.007", "T1613", "T1611"],
+  "prerequisites": ["kubectl access with at least cluster-reader ClusterRole", "Kubernetes audit logging enabled and forwarded to SIEM", "Access to container runtime logs (Docker daemon or containerd)", "Falco runtime security tool deployed (preferred)"],
+  "required_tools": ["kubectl CLI", "Falco (runtime threat detection)", "kube-hunter (authorized scan)", "Trivy (image vulnerability scanning)", "Splunk or Elastic with K8s audit log index"],
+  "references": [
+    "https://attack.mitre.org/techniques/T1610/",
+    "https://microsoft.github.io/Threat-Matrix-for-Kubernetes/",
+    "https://github.com/falcosecurity/falco"
+  ],
+  "hunt_actions": [
+    {
+      "title": "Unauthorized Container and Workload Activity",
+      "actions": [
+        "List all running containers and identify unrecognized images: `kubectl get pods -A -o json | jq -r '.items[] | {namespace: .metadata.namespace, pod: .metadata.name, image: .spec.containers[].image}' | jq -s 'unique_by(.image) | .[] | select(.image | test(\"approved-registry\") | not)'` — replace approved-registry with your registry FQDN; flag any pod using images from DockerHub or unknown registries.",
+        "Detect privileged containers and host namespace sharing: `kubectl get pods -A -o json | jq -r '.items[] | select(.spec.containers[].securityContext.privileged==true or .spec.hostPID==true or .spec.hostNetwork==true or .spec.hostIPC==true) | {namespace: .metadata.namespace, pod: .metadata.name}'` — any privileged pod not in the approved list (e.g., node exporters, DaemonSets) requires immediate investigation.",
+        "Hunt for containers with mounted host paths: `kubectl get pods -A -o json | jq -r '.items[] | select(.spec.volumes[]?.hostPath != null) | {ns: .metadata.namespace, pod: .metadata.name, path: [.spec.volumes[].hostPath.path // empty]}'` — host mounts of /etc, /var/run/docker.sock, or / indicate a breakout attempt or misconfiguration.",
+        "Check for recently created or modified CronJobs and Jobs: `kubectl get cronjobs -A -o wide; kubectl get jobs -A --sort-by=.metadata.creationTimestamp | tail -20` — review schedules and image sources for any unauthorized workloads; also: `kubectl describe cronjob <name> -n <ns>` to inspect the full job spec."
+      ]
+    },
+    {
+      "title": "RBAC and Secrets Access Abuse",
+      "actions": [
+        "Audit RBAC bindings for overly permissive roles: `kubectl get clusterrolebindings -o json | jq -r '.items[] | select(.roleRef.name==\"cluster-admin\") | {binding: .metadata.name, subjects: .subjects}'` — cluster-admin should be bound only to the absolute minimum set of service accounts and human accounts; compare against approved list.",
+        "Detect secret enumeration activity in K8s audit logs: Splunk: `index=k8s_audit verb=list OR verb=get objectRef.resource=secrets user.username!=system:kube-controller-manager user.username!=system:kube-scheduler | stats count by user.username, objectRef.namespace | sort -count` — any non-system account listing or reading secrets in bulk is high priority.",
+        "Hunt for service account token mounts in unauthorized pods: `kubectl get pods -A -o json | jq -r '.items[] | select(.spec.automountServiceAccountToken==true or .spec.automountServiceAccountToken==null) | {ns: .metadata.namespace, pod: .metadata.name, sa: .spec.serviceAccountName}'` — then check each service account's RBAC rights with `kubectl describe clusterrolebinding | grep -A5 <serviceaccount>`.",
+        "Identify new ClusterRole or Role bindings created in last 30 days: `kubectl get clusterrolebindings --sort-by=.metadata.creationTimestamp -o json | jq -r '.items[-10:] | .[] | {name: .metadata.name, created: .metadata.creationTimestamp, role: .roleRef.name, subjects: .subjects}'` — cross-reference against approved RBAC change log."
+      ]
+    },
+    {
+      "title": "Container Escape and Node Compromise",
+      "actions": [
+        "Check for suspicious processes running inside containers via Falco: Review Falco alert output for rules: 'Terminal shell in container', 'Contact K8S API Server From Container', 'Netcat Remote Code Execution', or 'Write below root'. Falco log location: `journalctl -u falco -f` or `kubectl logs -n falco -l app=falco --since=24h`",
+        "Detect container escape via docker.sock mount: `find / -name 'docker.sock' -type s 2>/dev/null` — if docker.sock is mounted inside a container and accessible to the container process, full host compromise is trivial. Verify: `ls -la /var/run/docker.sock` and `docker inspect <container_id> | jq '.[].Mounts[] | select(.Source==\"/var/run/docker.sock\")'`",
+        "Hunt for cryptomining indicators in container CPU usage: `kubectl top pods -A | sort -k3 -rn | head -20` — pods with sustained CPU > 80% when not under load, or `docker stats --no-stream | sort -k3 -rn | head -10` — cross-reference high-CPU containers with their image and network connections using `docker exec <container_id> ss -tnp`"
+      ]
+    }
+  ],
+  "questions": [
+    "Is Kubernetes API server audit logging enabled and configured to capture at least RequestResponse level for the secrets, configmaps, pods, and exec API groups, and are logs forwarded to the SIEM?",
+    "Is Falco or an equivalent Kubernetes runtime threat detection tool deployed as a DaemonSet on all nodes, and are alerts forwarded to the security operations team in real time?",
+    "Is a container image scanning tool (Trivy, Prisma Cloud, Sysdig) integrated into the CI/CD pipeline to block deployment of images with Critical-severity vulnerabilities?",
+    "Are Pod Security Admission (PSA) policies or a third-party admission controller (OPA Gatekeeper, Kyverno) enforcing restrictions on privileged containers, hostPath mounts, and host namespace sharing?",
+    "Is the Kubernetes RBAC model formally documented, and is the principle of least privilege enforced such that no service accounts or user accounts have cluster-admin unless explicitly justified and approved?",
+    "Are Kubernetes secrets stored in etcd encrypted at rest (kube-apiserver --encryption-provider-config), and are secrets also managed through an external secrets manager (HashiCorp Vault, AWS Secrets Manager)?",
+    "Is network policy enforced within the cluster to restrict pod-to-pod communication to only approved paths (deny-all default NetworkPolicy with explicit allow rules per namespace)?",
+    "Are container images sourced exclusively from an internal, approved registry with image signing (Cosign/Notary) enforced via admission control, preventing unsigned or external images from running?"
+  ]
+}

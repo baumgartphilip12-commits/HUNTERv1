@@ -1,0 +1,84 @@
+{
+  "id": "mod_database",
+  "name": "Database Server Hunt",
+  "category": "Endpoint",
+  "author": "Data Security Team",
+  "last_updated": "2026-04-15",
+  "priority": "Critical",
+  "estimated_hours": 4,
+  "mitre_techniques": [
+    "T1213",
+    "T1190",
+    "T1505.001",
+    "T1059.003"
+  ],
+  "prerequisites": [
+    "Database audit logging enabled (general query log",
+    "audit plugin",
+    "or SQL Server Audit)",
+    "DBA read-only access to system tables and audit logs",
+    "SIEM receiving database audit events",
+    "Network access logs for database ports (1433",
+    "3306",
+    "5432",
+    "1521)"
+  ],
+  "required_tools": [
+    "SQL Server Audit / MySQL Enterprise Audit / pgAudit",
+    "Splunk with database log sourcetype",
+    "Database Activity Monitor (Imperva",
+    "IBM Guardium \u2014 if deployed)",
+    "SolarWinds DPA or equivalent query analysis tool"
+  ],
+  "tags": [
+    "Database",
+    "SQL Server",
+    "MySQL",
+    "PostgreSQL",
+    "Oracle",
+    "MongoDB"
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1213/",
+    "https://attack.mitre.org/techniques/T1505/001/",
+    "https://www.cisecurity.org/benchmark/microsoft_sql_server"
+  ],
+  "hunt_actions": [
+    {
+      "title": "Unauthorized Access and Privilege Escalation",
+      "actions": [
+        "Enumerate database accounts with excessive privileges (SQL Server): `SELECT p.name, p.type_desc, p.is_disabled, r.name AS role_name FROM sys.database_principals p LEFT JOIN sys.database_role_members rm ON p.principal_id = rm.member_principal_id LEFT JOIN sys.database_principals r ON rm.role_principal_id = r.principal_id WHERE r.name IN ('db_owner','sysadmin','securityadmin') ORDER BY p.name;` \u2014 compare against approved DBA list.",
+        "Detect database accounts created outside change windows: MySQL: `SELECT user, host, password_last_changed, account_locked FROM mysql.user ORDER BY password_last_changed DESC LIMIT 20;` SQL Server: `SELECT name, create_date, modify_date, type_desc FROM sys.server_principals WHERE type IN ('S','U') ORDER BY create_date DESC;` \u2014 any account created without a corresponding change ticket is a finding.",
+        "Hunt for xp_cmdshell execution in SQL Server (OS command execution): `SELECT event_time, server_principal_name, database_name, statement FROM sys.fn_get_audit_file('/var/opt/mssql/audit/*.sqlaudit', DEFAULT, DEFAULT) WHERE statement LIKE '%xp_cmdshell%' ORDER BY event_time DESC;` \u2014 xp_cmdshell should be disabled; any execution indicates active exploitation or misconfiguration.",
+        "Identify UDF or stored procedure abuse for privilege escalation: MySQL: `SELECT routine_name, routine_schema, security_type, definer FROM information_schema.routines WHERE security_type='DEFINER' AND definer LIKE 'root%' ORDER BY last_altered DESC;` \u2014 stored procedures running as root/sa with user-controllable inputs are SQL injection risks."
+      ]
+    },
+    {
+      "title": "Data Exfiltration Detection",
+      "actions": [
+        "Detect bulk SELECT operations returning large datasets: SQL Server Audit or pgAudit: `SELECT user_name, client_hostname, COUNT(*) as query_count, SUM(rows_affected) as total_rows FROM database_audit_log WHERE action='SELECT' AND timestamp > NOW() - INTERVAL '30 days' GROUP BY user_name, client_hostname HAVING total_rows > 100000 ORDER BY total_rows DESC;` \u2014 users or service accounts pulling > 100,000 rows outside normal application behavior are high-priority.",
+        "Hunt for SELECT INTO OUTFILE or mysqldump usage (MySQL data export): `grep -E 'SELECT.+INTO OUTFILE|mysqldump|mysqlpump|mydumper' /var/log/mysql/mysql-general.log | grep -v '127.0.0.1' | awk '{print $1, $2, $NF}' | sort | uniq -c | sort -rn | head -20` \u2014 all data export operations should be authorized and logged.",
+        "Identify database linked server / dblink queries to unknown hosts: SQL Server: `SELECT name, provider, data_source, is_linked FROM sys.servers WHERE is_linked=1;` PostgreSQL: `SELECT srvname, srvoptions FROM pg_foreign_server;` \u2014 linked servers to unknown external hosts may be used for data exfiltration via SQL queries.",
+        "Detect database files or backup dumps created recently: `find /var/lib/mysql /var/lib/postgresql /opt/mssql/data -name '*.bak' -o -name '*.dump' -o -name '*.sql' -o -name '*.tar.gz' -newer /etc/passwd | ls -lh 2>/dev/null | sort -k5 -rn` \u2014 unauthorized database dumps indicate active data theft; also: `SELECT name, physical_name, state_desc, create_date FROM sys.master_files ORDER BY create_date DESC;` (SQL Server)."
+      ]
+    },
+    {
+      "title": "Database Configuration and Persistence Checks",
+      "actions": [
+        "Check for database-level triggers used for persistence: SQL Server: `SELECT t.name, o.name AS parent_table, t.is_disabled, m.definition FROM sys.triggers t JOIN sys.objects o ON t.parent_id=o.object_id JOIN sys.sql_modules m ON t.object_id=m.object_id ORDER BY t.modify_date DESC;` MySQL: `SELECT TRIGGER_SCHEMA, TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_STATEMENT FROM information_schema.triggers ORDER BY LAST_ALTERED DESC LIMIT 20;`",
+        "Verify SQL Server audit is enabled and intact: `SELECT name, audit_file_path, status_desc, max_file_size FROM sys.server_audits;` and `SELECT * FROM sys.server_audit_specifications; SELECT * FROM sys.database_audit_specifications;` \u2014 verify audit covers LOGIN, LOGOUT, OBJECT_ACCESS, SCHEMA_OBJECT_ACCESS, and EXECUTE actions; any gaps indicate potential tampering.",
+        "Hunt for unauthorized network connections to database ports: `ss -tnp | grep -E ':1433|:3306|:5432|:1521|:27017'` and `netstat -an | grep ESTABLISHED | grep -E '1433|3306|5432|1521'` \u2014 compare active connection source IPs against approved application servers and DBA workstations list; any unexpected source is a finding."
+      ]
+    }
+  ],
+  "questions": [
+    "Is database-level auditing enabled on all production database servers, capturing at minimum authentication events, privilege use, DDL changes, and bulk data access operations?",
+    "Are database audit logs forwarded to an independent SIEM or immutable log store that is inaccessible to database administrators, ensuring audit log integrity?",
+    "Is the principle of least privilege enforced for all database accounts, with application service accounts restricted to only the schemas and operations required by the application (no db_owner or DBA-level roles)?",
+    "Are all database servers restricted to accept connections only from approved application server IP ranges via network access controls (firewall rules, security groups, or host-based ACLs)?",
+    "Is xp_cmdshell disabled on all SQL Server instances (verify with `SELECT value_in_use FROM sys.configurations WHERE name='xp_cmdshell'`), and are all other extended stored procedures that enable OS interaction audited?",
+    "Are database backup files encrypted at rest and stored in a location inaccessible to the database service account, and is access to backup files subject to the same access controls as production data?",
+    "Are database credentials for application service accounts stored in a secrets management system (HashiCorp Vault, AWS Secrets Manager, Azure Key Vault) with automatic rotation, rather than in application configuration files?",
+    "Is a Database Activity Monitoring (DAM) solution deployed on all databases containing Personally Identifiable Information (PII), Protected Health Information (PHI), or financial data, as required by applicable regulatory frameworks?"
+  ]
+}

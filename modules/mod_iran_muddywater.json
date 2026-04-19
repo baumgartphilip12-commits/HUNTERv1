@@ -1,0 +1,68 @@
+{
+  "id": "mod_iran_muddywater",
+  "name": "Iran MuddyWater — MERCURY / Static Kitten",
+  "category": "APT",
+  "tags": ["Iran", "MuddyWater", "MERCURY", "Static Kitten", "MOIS", "PowerShell", "RMM"],
+  "author": "Threat Intelligence Team",
+  "last_updated": "2025-04-01",
+  "priority": "Critical",
+  "estimated_hours": 5,
+  "mitre_techniques": ["T1219", "T1059.001", "T1547.001", "T1053.005", "T1036.005", "T1027"],
+  "prerequisites": [
+    "PowerShell ScriptBlock logging (Event 4104) enabled via Group Policy",
+    "Endpoint EDR covering all Windows systems",
+    "Proxy/web gateway logs capturing application-layer HTTP metadata",
+    "Network flow data available for the hunt window"
+  ],
+  "required_tools": [
+    "Splunk or Elastic with Windows Event, proxy, and network log indexes",
+    "Sysmon with process creation (Event 1) and network connection (Event 3) logging",
+    "EDR console (CrowdStrike, Microsoft Defender for Endpoint)",
+    "CISA Advisory AA22-055A IOC list loaded into SIEM"
+  ],
+  "references": [
+    "https://attack.mitre.org/groups/G0069/",
+    "https://www.cisa.gov/news-events/cybersecurity-advisories/aa22-055a",
+    "https://www.microsoft.com/en-us/security/blog/2022/08/25/mercury-leveraging-log4j-2-vulnerabilities-in-unpatched-systems-to-target-israeli-organizations/"
+  ],
+  "hunt_actions": [
+    {
+      "title": "Legitimate RMM Tool Abuse Detection",
+      "actions": [
+        "Hunt for unauthorized Remote Monitoring and Management (RMM) tools — MuddyWater abuses ScreenConnect, RemoteUtilities, Syncro, and Atera as C2: `index=windows EventCode=4688 Image IN (*ScreenConnect*,*RemoteUtilities*,*Atera*,*Syncro*,*AnyDesk*,*TeamViewer*,*Zoho*) | stats count by host, Image, CommandLine | where NOT [search index=approved_software tool_name IN (*ScreenConnect*,*RemoteUtilities*,*AnyDesk*)]` — any RMM tool not in the approved software inventory is a finding",
+        "Detect RMM C2 callback traffic to unapproved cloud relay infrastructure: `index=proxy cs-uri-stem IN (*screenconnect.com*,*remoteutilities.com*,*syncromsp.com*,*atera.com*) | stats count by src_ip, cs-uri-stem, cs-username | where NOT [lookup approved_rmm src_ip OUTPUT authorized | where authorized='yes']` — relay connections through approved RMM vendors from unapproved endpoints are equally suspicious"
+      ]
+    },
+    {
+      "title": "PowerShell-based Persistence and C2 (POWGOOP, CANOPY)",
+      "actions": [
+        "Hunt for POWGOOP DLL loader (loads PowerShell-based malware via regsvr32): `index=windows EventCode=4688 (Image=*regsvr32.exe* CommandLine=*/s* AND CommandLine!=*ScrRun.dll*) OR (ParentImage=*regsvr32.exe* Image=*powershell.exe*) | table _time, host, Image, ParentImage, CommandLine` — POWGOOP uses regsvr32 to load a DLL that spawns an obfuscated PowerShell C2 loop",
+        "Detect CANOPY data collection script (collects system info, exfils via HTTP POST): `index=windows EventCode=4104 ScriptBlockText=*Get-WmiObject* AND ScriptBlockText=*Invoke-WebRequest* AND ScriptBlockText=*POST* | table _time, host, ScriptBlockText` — CANOPY fingerprints the victim host and sends results to C2; look for WMI queries combined with outbound HTTP POST in the same PowerShell session"
+      ]
+    },
+    {
+      "title": "Log4Shell Exploitation for Initial Access",
+      "actions": [
+        "Hunt for Log4Shell exploitation attempts against internet-facing Java applications (MuddyWater actively exploited CVE-2021-44228): `index=webserver (uri_path=*${jndi:* OR uri_path=*${${lower:j}ndi* OR user_agent=*${jndi:* OR user_agent=*${${::-j}${::-n}${::-d}${::-i}*) | table _time, host, c-ip, cs-uri-stem, cs(User-Agent)` — also check HTTP request headers (X-Forwarded-For, User-Agent, Referer) as Log4Shell payloads were inserted into all header fields",
+        "Identify post-exploitation activity following Log4Shell (MuddyWater deployed web shells and reverse shells): `index=webserver sc-status=200 cs-method=POST cs-uri-stem IN (*/.*/,*/tmp/*) | stats count by cs-uri-stem, c-ip | where count > 5` — also: `find /opt /var/www /usr/local -name '*.class' -newer /etc/passwd -ls 2>/dev/null | grep -v '.jar' | sort`"
+      ]
+    },
+    {
+      "title": "Scheduled Task and Registry Persistence",
+      "actions": [
+        "Hunt for MuddyWater scheduled task persistence (uses schtasks.exe with obfuscated PowerShell): `index=windows EventCode=4698 | rex field=TaskContent '<Command>(?P<cmd>[^<]+)' | where match(cmd, 'powershell|wscript|cscript|mshta|regsvr32|rundll32') | table _time, host, TaskName, cmd, SubjectUserName` — MuddyWater scheduled tasks typically use encoded PowerShell or VBScript and run as SYSTEM",
+        "Detect registry run key persistence with obfuscated commands: Sysmon Event 13 (RegistryValueSet): `index=windows EventCode=13 TargetObject IN (*\\CurrentVersion\\Run*,*\\CurrentVersion\\RunOnce*) | where match(Details, 'powershell|wscript|cscript|rundll32|mshta|regsvr32') | table _time, host, TargetObject, Details, Image` — compare registered values against known-good software baseline"
+      ]
+    }
+  ],
+  "questions": [
+    "Is there a formally maintained and enforced approved software list, and are unauthorized Remote Monitoring and Management (RMM) tools blocked from execution via AppLocker, WDAC, or EDR policy?",
+    "Are all internet-facing Java applications (including Atlassian, VMware, Cisco products) patched against Log4Shell (CVE-2021-44228) and subsequent Log4j vulnerabilities (CVE-2021-45046, CVE-2021-45105)?",
+    "Is PowerShell ScriptBlock logging (Event 4104) and Constrained Language Mode enforced organization-wide to limit MuddyWater's ability to execute arbitrary PowerShell payloads?",
+    "Are outbound connections from servers to Remote Desktop / RMM relay infrastructure (e.g., ScreenConnect cloud, AnyDesk relay nodes) monitored and alerted upon if the connection was not pre-approved via change control?",
+    "Are scheduled task creation events (Windows Event 4698) monitored in the SIEM with alerting for tasks created outside of approved maintenance windows or by non-administrative accounts?",
+    "Is regsvr32.exe execution by standard user accounts or from non-standard directories (e.g., Temp, AppData) blocked via application control policy?",
+    "Are CISA advisories for MuddyWater/MERCURY (AA22-055A and subsequent updates) reviewed upon release, and are associated IOCs ingested into the SIEM and endpoint security tools within 24 hours of publication?",
+    "Are government-sector and telecommunications partner organizations included in the threat model for this assessment, given MuddyWater's documented targeting of these sectors in the Middle East, Europe, and North America?"
+  ]
+}

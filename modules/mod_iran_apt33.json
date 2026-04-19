@@ -1,0 +1,68 @@
+{
+  "id": "mod_iran_apt33",
+  "name": "Iran APT33 — Shamoon / OilRig",
+  "category": "APT",
+  "tags": ["Iran", "APT33", "OilRig", "Shamoon", "Spearphish", "Wiper"],
+  "author": "Threat Intelligence Team",
+  "last_updated": "2025-04-01",
+  "priority": "Critical",
+  "estimated_hours": 6,
+  "mitre_techniques": ["T1566.001", "T1078", "T1485", "T1071.001", "T1059.001", "T1105"],
+  "prerequisites": [
+    "Email gateway logs for the hunt window available in SIEM",
+    "Endpoint EDR telemetry (CrowdStrike, Defender, or equivalent) active",
+    "Windows Security event logs forwarded from all endpoints and servers",
+    "Threat intel feed with APT33/OilRig IOCs loaded (IPs, domains, file hashes)"
+  ],
+  "required_tools": [
+    "Splunk or Elastic SIEM with email + endpoint + network log index",
+    "VirusTotal Enterprise or similar for hash/IOC enrichment",
+    "MISP or OpenCTI with APT33 IOC feeds",
+    "Wireshark / Zeek for HTTPS C2 traffic analysis"
+  ],
+  "references": [
+    "https://attack.mitre.org/groups/G0064/",
+    "https://www.mandiant.com/resources/apt33-insights-into-iranian-cyber-espionage",
+    "https://www.cisa.gov/news-events/cybersecurity-advisories/aa21-321a"
+  ],
+  "hunt_actions": [
+    {
+      "title": "Spearphishing Delivery Detection",
+      "actions": [
+        "Search email logs for APT33-linked sender domains (e.g., boeing-hr[.]com, hr-wipro[.]com, oil-jobs[.]com). Splunk: `index=email (SenderDomain=*boeing-hr* OR SenderDomain=*hr-wipro* OR SenderDomain=*oil-jobs* OR SenderDomain=*netzero-energy*) | table _time, SenderAddress, RecipientAddress, Subject, AttachmentName`",
+        "Hunt for macro-enabled Office attachments delivered to energy-sector recipients: `index=email AttachmentExtension IN (.xlsm,.docm,.xlsb,.ppam) | stats count by SenderAddress, RecipientAddress, AttachmentName, AttachmentHash | where count > 0` — submit AttachmentHash values to VirusTotal: `curl -s 'https://www.virustotal.com/api/v3/files/<sha256>' -H 'x-apikey: <key>' | jq '.data.attributes.crowdsourced_ids_results'`"
+      ]
+    },
+    {
+      "title": "Shamoon Wiper Indicators",
+      "actions": [
+        "Hunt for RawDisk driver loading (Shamoon uses Eldos RawDisk): Windows Event 7045 (new service installed) with ServiceName or ImagePath containing 'ElRawDsk', 'RawDisk', or known Shamoon driver hashes. Splunk: `index=windows EventCode=7045 (ServiceName=*raw* OR ServiceName=*disk* OR ServiceName=*eldos*) | table _time, host, ServiceName, ImagePath`",
+        "Detect mass file overwrite/deletion activity: `index=windows EventCode=4663 ObjectType=File AccessMask=0x40010 | stats count as file_ops by SubjectUserName, host | where file_ops > 500 | sort -file_ops` — Shamoon variants overwrite MBR and bulk-delete files; > 500 file write events in a short window from a single account is a strong indicator"
+      ]
+    },
+    {
+      "title": "OilRig / POWRUNER C2 Detection",
+      "actions": [
+        "Hunt POWRUNER/BONDUPDATER DNS-based C2 (uses TXT record queries for command exfil): `index=dns query_type=TXT | stats count by src_ip, query | where count > 10 | sort -count` — OilRig encodes commands in DNS TXT responses; high-frequency TXT queries from a single host to a single domain are a red flag",
+        "Detect POWRUNER PowerShell execution pattern (Base64-encoded, downloads from C2): Splunk: `index=windows EventCode=4104 ScriptBlockText=*Invoke-WebRequest* OR ScriptBlockText=*Net.WebClient* OR ScriptBlockText=*DownloadString* | regex ScriptBlockText=\"[A-Za-z0-9+/]{100,}={0,2}\" | table _time, host, ScriptBlockText` — submit decoded payload to hybrid analysis"
+      ]
+    },
+    {
+      "title": "Credential Theft and Lateral Movement",
+      "actions": [
+        "Hunt for Mimikatz or LSASS dump attempts known to APT33 post-exploitation: `index=windows EventCode=10 TargetImage=*lsass.exe* CallTrace=*MiniDumpWriteDump* OR CallTrace=*comsvcs.dll* | table _time, host, SourceImage, TargetImage, CallTrace` (Sysmon Event 10, process access). Also: `index=windows EventCode=4688 CommandLine IN (*procdump*,*comsvcs*,*MiniDump*,*sekurlsa*) | table _time, host, CommandLine`",
+        "Detect pass-the-hash lateral movement to adjacent hosts: `index=windows EventCode=4624 Logon_Type=3 AuthenticationPackageName=NTLM | stats dc(host) as target_count by SubjectUserName, IpAddress | where target_count > 3 | sort -target_count` — APT33 is known to move laterally to domain controllers and email servers after initial compromise"
+      ]
+    }
+  ],
+  "questions": [
+    "Has the organization received any targeted spearphishing emails referencing oil, gas, aviation, or defense sector job opportunities in the past 90 days, and are those emails preserved for analysis?",
+    "Are macro execution policies enforced via Group Policy to block Office macros from the internet (Trust Center > Macro Settings > Disable all macros except digitally signed macros)?",
+    "Are offline backups of critical servers stored in an air-gapped or immutable location, and has a recovery drill been performed within the last 12 months to validate restoration from a Shamoon-style wiper event?",
+    "Are DNS query logs (including TXT record query types) captured and forwarded to the SIEM for all internal DNS resolvers?",
+    "Is LSASS process access restricted via Windows Defender Credential Guard or RunAsPPL, and has this been verified on all domain controllers and critical servers?",
+    "Are known APT33/OilRig IOCs (IP addresses, domains, file hashes) loaded into the SIEM as a threat intelligence lookup, and are they generating alerts on match?",
+    "What internet-facing systems (VPN gateways, OWA, remote desktop) are accessible by accounts that also have access to OT or industrial control systems, creating a potential IT-OT pivot path?",
+    "Is the organization's sector (energy, aerospace, defense, petrochemical) one that APT33 has historically targeted, and has this been formally assessed in the current threat model?"
+  ]
+}

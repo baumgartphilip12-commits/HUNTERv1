@@ -1,0 +1,72 @@
+{
+  "id": "mod_aws_general",
+  "name": "AWS General Hunt!!",
+  "category": "Cloud",
+  "author": "SOC Team Alpha",
+  "last_updated": "2026-04-14",
+  "priority": "High",
+  "estimated_hours": 4,
+  "mitre_techniques": [
+    "T1078",
+    "T1530",
+    "T1537"
+  ],
+  "prerequisites": [
+    "AWS CloudTrail enabled in all regions",
+    "GuardDuty active",
+    "Read-only IAM role (SecurityAudit or ReadOnlyAccess)"
+  ],
+  "required_tools": [
+    "AWS CLI v2",
+    "Splunk with CloudTrail Add-on or AWS Athena",
+    "Steampipe (optional)"
+  ],
+  "tags": [
+    "AWS",
+    "Cloud",
+    "IAM",
+    "CloudTrail"
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1078/",
+    "https://docs.aws.amazon.com/guardduty/latest/ug/what-is-guardduty.html"
+  ],
+  "hunt_actions": [
+    {
+      "title": "Credential Abuse Detection",
+      "actions": [
+        "List IAM users with console access but no MFA: `aws iam generate-credential-report && aws iam get-credential-report | python3 -c 'import sys,base64,csv; r=csv.DictReader(base64.b64decode(sys.stdin.read()).decode().splitlines()); [print(row) for row in r if row[\"password_enabled\"]==\"true\" and row[\"mfa_active\"]==\"false\"]'`",
+        "Query CloudTrail for API calls from unusual regions: In Athena run `SELECT useridentity.arn, awsregion, COUNT(*) as cnt FROM cloudtrail_logs WHERE awsregion NOT IN ('us-east-1','us-west-2') AND eventtime > '2025-01-01' GROUP BY 1,2 ORDER BY cnt DESC LIMIT 50;`",
+        "Detect root account usage: `aws cloudtrail lookup-events --lookup-attributes AttributeKey=Username,AttributeValue=root --start-time $(date -d '90 days ago' +%s) --query 'Events[*].{Time:EventTime,Event:EventName,IP:CloudTrailEvent}' --output table`",
+        "Hunt AssumeRole chains: Search CloudTrail for eventName=AssumeRole where requestParameters.roleArn differs from useridentity.sessioncontext.sessionissuer.arn across consecutive events within a 5-minute window. Splunk SPL: `index=cloudtrail eventName=AssumeRole | transaction useridentity.principalId maxspan=5m | where mvcount(requestParameters.roleArn) > 3`"
+      ]
+    },
+    {
+      "title": "Data Exfiltration Indicators",
+      "actions": [
+        "Find S3 buckets with public ACLs created in the last 30 days: `aws s3api list-buckets --query 'Buckets[?CreationDate>=`2025-03-01`].[Name]' --output text | xargs -I{} aws s3api get-bucket-acl --bucket {} 2>/dev/null | grep -i 'AllUsers\\|AuthenticatedUsers'`",
+        "Detect large S3 GetObject by non-service accounts: CloudTrail Athena query: `SELECT useridentity.arn, requestparameters, SUM(CAST(additionaleventdata.bytestransferred AS BIGINT)) as total_bytes FROM cloudtrail_logs WHERE eventname='GetObject' AND eventtime > '2025-01-01' GROUP BY 1,2 HAVING total_bytes > 1073741824 ORDER BY total_bytes DESC;`",
+        "Review Glacier vault policy changes: `aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=SetVaultAccessPolicy --output table`",
+        "Audit cross-account data sharing: `aws s3api list-buckets --output text --query 'Buckets[].Name' | xargs -I{} sh -c 'echo {}; aws s3api get-bucket-policy --bucket {} 2>/dev/null | python3 -m json.tool | grep -i \"AWS\":' 2>/dev/null`"
+      ]
+    },
+    {
+      "title": "Persistence Mechanisms",
+      "actions": [
+        "Hunt for IAM users or access keys created in last 7 days: `aws iam list-users --query 'Users[?CreateDate>=`2025-03-24`].[UserName,CreateDate,UserId]' --output table` and `aws iam list-access-keys --query 'AccessKeyMetadata[?CreateDate>=`2025-03-24`]'`",
+        "Detect Lambda functions created outside CI/CD: `aws lambda list-functions --query 'Functions[?LastModified>=`2025-01-01`].[FunctionName,LastModified,Role]' --output table` then cross-reference with approved deployment pipeline IAM roles.",
+        "Review CloudFormation stacks for unauthorized resources: `aws cloudformation describe-stacks --query 'Stacks[*].[StackName,StackStatus,CreationTime,LastUpdatedTime]' --output table` then `aws cloudformation list-stack-resources --stack-name <StackName>` for any unfamiliar stack."
+      ]
+    }
+  ],
+  "questions": [
+    "Is AWS CloudTrail enabled and logging to S3 in ALL regions, including the global services region (us-east-1)?",
+    "Are CloudTrail S3 bucket logs protected by MFA-delete and versioning to prevent tampering?",
+    "Is AWS GuardDuty enabled in every active account and region within the organization?",
+    "What is the configured CloudTrail log retention period, and does it meet the organization's minimum retention policy (e.g., 1 year)?",
+    "Are there any IAM users or roles assigned the AWS managed AdministratorAccess policy, and are they justified and documented?",
+    "Is there a formal approval process for cross-account IAM role trust relationships, and is that list reviewed quarterly?",
+    "Which SIEM or log aggregation platform ingests CloudTrail logs, and what is the average ingest latency?",
+    "Are AWS Config rules deployed to enforce compliance baselines (e.g., MFA on root, no public S3 buckets), and are non-compliant findings remediated automatically or manually?"
+  ]
+}

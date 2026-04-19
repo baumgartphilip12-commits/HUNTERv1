@@ -1,0 +1,56 @@
+{
+  "id": "mod_azure_ad",
+  "name": "Azure AD / Entra ID Hunt",
+  "category": "Identity",
+  "tags": ["Azure", "Entra ID", "AAD", "MFA", "Conditional Access", "PIM"],
+  "author": "Cloud Identity Team",
+  "last_updated": "2025-03-18",
+  "priority": "Critical",
+  "estimated_hours": 3,
+  "mitre_techniques": ["T1078.004", "T1621", "T1606.002"],
+  "prerequisites": ["Global Reader or Security Reader Entra ID role assigned to hunt account", "Azure AD Sign-in logs retained for 30+ days (requires P1/P2 license)", "Microsoft Defender for Identity or Sentinel workspace access"],
+  "required_tools": ["Microsoft Sentinel or Defender XDR", "PowerShell Az and AzureAD / Microsoft.Graph modules", "Entra ID Portal (https://entra.microsoft.com)", "MFASweep or AADInternals (for authorized assessment use)"],
+  "references": [
+    "https://attack.mitre.org/techniques/T1078/004/",
+    "https://learn.microsoft.com/en-us/entra/identity/monitoring-health/",
+    "https://github.com/dafthack/MFASweep"
+  ],
+  "hunt_actions": [
+    {
+      "title": "MFA Bypass and Authentication Attack Detection",
+      "actions": [
+        "Hunt MFA fatigue (push bombing): Sentinel KQL: `SigninLogs | where ResultType == '50076' | summarize PushCount=count(), TimeRange=max(TimeGenerated)-min(TimeGenerated) by UserPrincipalName, IPAddress, bin(TimeGenerated,1h) | where PushCount > 10 | order by PushCount desc` — 50076 is the result code for MFA required but not satisfied.",
+        "Identify legacy authentication protocol usage: `SigninLogs | where ClientAppUsed in ('Exchange ActiveSync','IMAP4','POP3','SMTP','Mapi','AutoDiscover','Other clients') | summarize count() by UserPrincipalName, ClientAppUsed, IPAddress | order by count_ desc` — legacy auth bypasses modern MFA; any result should be investigated and blocked.",
+        "Detect adversary-in-the-middle / token theft indicators: `SigninLogs | where isnotempty(TokenProtectionStatus) and TokenProtectionStatus == 'unbound' | where AppId !in ('<approved_app_ids>') | project TimeGenerated, UserPrincipalName, IPAddress, Location, AppDisplayName, UserAgent` — unbound tokens on sensitive apps indicate potential AiTM phishing.",
+        "Review Conditional Access policy exclusions: In Entra portal navigate to Protection > Conditional Access > Policies > select each policy > Conditions > Users > Excluded Users. Export via Graph: `Connect-MgGraph -Scopes 'Policy.Read.All'; Get-MgIdentityConditionalAccessPolicy | ForEach { $_.Conditions.Users.ExcludeUsers }` — any named exclusion from MFA policies must be reviewed."
+      ]
+    },
+    {
+      "title": "Privileged Role Abuse",
+      "actions": [
+        "Audit all privileged role assignments: `Connect-MgGraph -Scopes 'RoleManagement.Read.Directory'; Get-MgDirectoryRole | ForEach { $role=$_; Get-MgDirectoryRoleMember -DirectoryRoleId $role.Id | Select @{n='Role';e={$role.DisplayName}}, @{n='Member';e={$_.AdditionalProperties.userPrincipalName}} } | Export-Csv privileged_roles.csv` — compare against approved role assignment list.",
+        "Detect PIM role activations outside business hours: Sentinel KQL: `AuditLogs | where OperationName == 'Add member to role completed (PIM activation)' | extend UPN=tostring(TargetResources[0].userPrincipalName), Role=tostring(TargetResources[0].displayName) | where hourofday(TimeGenerated) !between (8 .. 18) or dayofweek(TimeGenerated) in (0d, 6d) | project TimeGenerated, UPN, Role, InitiatedBy`",
+        "Hunt for guest accounts with privileged role assignments: `Get-MgDirectoryRole | ForEach { $role=$_; Get-MgDirectoryRoleMember -DirectoryRoleId $role.Id } | Where-Object { $_.AdditionalProperties.userType -eq 'Guest' } | Select AdditionalProperties` — guests should never hold privileged directory roles.",
+        "Identify service principals with owner rights on sensitive apps: `Get-MgApplication | ForEach { $app=$_; Get-MgApplicationOwner -ApplicationId $app.Id | Select @{n='App';e={$app.DisplayName}}, @{n='Owner';e={$_.AdditionalProperties.userPrincipalName}} }` — compare against approved application ownership registry."
+      ]
+    },
+    {
+      "title": "Application and OAuth Abuse",
+      "actions": [
+        "Hunt for OAuth consent grants to unverified applications: `Get-MgOauth2PermissionGrant -All | Where-Object { $_.ConsentType -eq 'Principal' } | Select ClientId, Scope, PrincipalId | Export-Csv oauth_grants.csv` — then cross-reference ClientId against list of Microsoft-verified publishers in Entra portal under App Registrations > All Applications > filter Verified.",
+        "Detect application impersonation permissions granted without admin review: `Get-MgServicePrincipal -All | ForEach { Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $_.Id } | Where-Object { $_.PrincipalType -eq 'ServicePrincipal' } | Select PrincipalId, ResourceId, AppRoleId | Export-Csv sp_approle_assignments.csv` — any Mail.ReadWrite, Files.ReadWrite.All, or .FullControl grants without documented approval are high-priority findings.",
+        "Identify high-privilege service principal credential additions: Sentinel KQL: `AuditLogs | where OperationName in ('Add service principal credentials','Update application - Certificates and secrets management') | extend SPName=tostring(TargetResources[0].displayName) | project TimeGenerated, SPName, InitiatedBy.user.userPrincipalName, OperationName` — correlate with known key rotation schedules."
+      ]
+    }
+  ],
+  "questions": [
+    "Is Microsoft Defender for Identity deployed and configured to send signals to Microsoft Sentinel or Defender XDR for correlation and alerting?",
+    "Are Azure AD sign-in logs and audit logs retained for a minimum of 90 days (requires Entra ID P1/P2 or Sentinel ingestion), and is retention verified?",
+    "Is Privileged Identity Management (PIM) enforced for all privileged directory roles (Global Admin, Privileged Role Admin, Security Admin, etc.) with just-in-time activation and approval workflow?",
+    "Are legacy authentication protocols blocked organization-wide via a Conditional Access policy, and has this been verified with sign-in log analysis for any bypass attempts?",
+    "Is multi-factor authentication enforced for all users — including service accounts where technically feasible — via Conditional Access, and are there any named account or group exclusions documented and formally risk-accepted?",
+    "Are guest user permissions restricted at the tenant level to prevent enumeration of directory objects (Tenant Settings > External Collaboration Settings > Guest User Access Restriction)?",
+    "Is the total count of Global Administrator accounts minimized to five or fewer, with each account formally justified, individually owned, and subject to quarterly access review?",
+    "Are app registrations and enterprise applications subject to a formal periodic review process (at least annually), and is there a designated application owner accountable for each registration?"
+  ]
+}

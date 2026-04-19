@@ -1,0 +1,55 @@
+{
+  "id": "mod_siem_log_integrity",
+  "name": "SIEM and Log Integrity Hunt",
+  "category": "Other",
+  "tags": ["SIEM", "Log Integrity", "Splunk", "Elastic", "Sentinel", "Audit"],
+  "author": "Detection Engineering",
+  "last_updated": "2025-03-25",
+  "priority": "Medium",
+  "estimated_hours": 2,
+  "mitre_techniques": ["T1562.006", "T1070", "T1562.001"],
+  "prerequisites": ["SIEM administrative or read-only admin access", "Access to log pipeline infrastructure (forwarders, collectors, ingestion configs)", "Baseline of expected log source volumes and event rates"],
+  "required_tools": ["Splunk Enterprise Security or Elastic SIEM admin console", "Log forwarder management console (Cribl, NXLog, Splunk UF)", "Python or Jupyter for log volume trend analysis"],
+  "references": [
+    "https://attack.mitre.org/techniques/T1562/006/",
+    "https://attack.mitre.org/techniques/T1070/"
+  ],
+  "hunt_actions": [
+    {
+      "title": "Log Source Completeness Verification",
+      "actions": [
+        "Identify log sources that have stopped sending data: Splunk: `| tstats count WHERE index=* BY index, sourcetype, host | where count=0 OR NOT [search index=* earliest=-1h | stats dc(host) as active_hosts by index | where active_hosts > 0 | table index]` — or more simply: `index=_internal sourcetype=splunkd_ui_access | stats max(_time) as last_seen by host | eval staleness=now()-last_seen | where staleness > 3600 | sort -staleness`",
+        "Detect gaps in event log continuity for critical sources: Splunk: `index=windows EventCode=4624 earliest=-25h latest=-24h | stats count by host` then compare against `index=windows EventCode=4624 earliest=-1h | stats count by host` — any host showing 0 events in the recent window but events in the baseline window has a log gap requiring investigation.",
+        "Verify Domain Controller log coverage: `Get-ADDomainController -Filter * | Select Name,IPv4Address` — compare against `index=windows sourcetype=WinEventLog:Security | stats dc(host) as dc_count by index` — every DC must appear in the SIEM; missing DCs are a blind spot that may be actively exploited.",
+        "Audit Splunk/Elastic forwarder health and version: Splunk: `index=_internal sourcetype=splunkd log_level=WARN OR ERROR | stats count by host, message | sort -count | head 20` — and: `| rest splunk_server=local /services/deployment/server/clients | table clientName, lastPhoneHomeTime, build` — forwarder versions > 90 days behind current release may have known vulnerabilities."
+      ]
+    },
+    {
+      "title": "Log Tampering and Suppression Detection",
+      "actions": [
+        "Detect Windows Event Log service tampering: Windows Event 1100 (event logging service shut down), 1102 (audit log cleared), 104 (system log cleared). Splunk: `index=windows EventCode IN (1100, 1102, 104) | table _time, host, EventCode, Message, SubjectUserName` — any event log clearing outside an approved maintenance window is a critical finding.",
+        "Hunt for auditd service stops on Linux: Splunk: `index=linux sourcetype=linux_secure | search 'service auditd stop\\|systemctl stop auditd\\|pkill auditd\\|killall auditd' | table _time, host, _raw` — also: `ausearch -m DAEMON_END -ts today 2>/dev/null` directly on hosts if central SIEM logging is not available.",
+        "Identify SIEM detection rule suppression or disabling: Splunk: `index=_audit action=search object_category=savedsearch operation=delete OR operation=disable | table _time, user, object_category, object, operation` — deleted or disabled correlation searches outside change control windows indicate an insider threat attempting to blind the SOC.",
+        "Detect large-scale event suppression via firewall or network ACL blocking log forwarder ports: `index=network_firewall action=drop dest_port IN (514, 6514, 601, 9997, 5044, 5514) | stats count by src_ip, dest_ip, dest_port | sort -count` — blocking syslog, Splunk, or Logstash forwarder ports from specific source IPs silences those log sources in the SIEM."
+      ]
+    },
+    {
+      "title": "Detection Coverage Gap Analysis",
+      "actions": [
+        "Map current detection rules against MITRE ATT&CK coverage: Use the MITRE ATT&CK Navigator (https://mitre-attack.github.io/attack-navigator/) to upload your current detection rule MITRE mappings. Export coverage gaps as a heat map. In Splunk ES: `| rest splunk_server=local /services/saved/searches | search title=ESCU* OR title=Sigma* | table title, description, tags` to enumerate enabled analytics.",
+        "Identify high-fidelity alerts with no assigned investigation workflow: `index=notable | stats count as alert_count by source, urgency, status | where status='unassigned' AND urgency IN ('critical','high') | sort -alert_count` — unassigned critical/high-fidelity alerts older than 4 hours represent coverage that exists but is not operationally effective.",
+        "Verify alert fatigue is not masking real detections: `index=notable | stats count by source | sort -count | head 20` — the top 5 highest-volume alert sources should be reviewed for tuning opportunities. Alerts firing > 1000 times per day are likely contributing to alert fatigue and may be masking genuine detections within the noise."
+      ]
+    }
+  ],
+  "questions": [
+    "Is there a documented inventory of all log sources expected to send data to the SIEM, including expected event rates and data volumes, against which completeness is continuously measured?",
+    "Are automated alerts configured to fire when a critical log source (Domain Controllers, firewalls, EDR, VPN) stops sending data to the SIEM for more than 15 minutes?",
+    "Are SIEM correlation rules and detection content mapped to MITRE ATT&CK techniques, and is the current coverage map reviewed quarterly to identify and prioritize gaps?",
+    "Is SIEM administrative access (the ability to delete indexes, disable alerts, or modify forwarder configurations) restricted to a small number of authorized personnel and subject to its own audit trail?",
+    "Are SIEM audit logs (the logs of the SIEM itself — admin actions, search activity, configuration changes) forwarded to a separate, independent log repository to detect insider threat activity targeting the SIEM?",
+    "Is there a documented detection engineering process with SLAs for onboarding new log sources, writing detections for new threat techniques, and tuning high-volume alerts to reduce false-positive rates?",
+    "Are Windows Event Log auditing policies (via GPO) and Linux auditd rules reviewed at least annually and compared against DISA STIGs or CIS Benchmark recommendations to ensure coverage of required event types?",
+    "Is there a tested and documented process for restoring SIEM functionality and log ingestion continuity in the event of a SIEM infrastructure outage or ransomware attack targeting the logging infrastructure?"
+  ]
+}

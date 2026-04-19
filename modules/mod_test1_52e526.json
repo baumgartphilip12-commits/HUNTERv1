@@ -1,0 +1,16 @@
+{
+  "id": "mod_test1_52e526",
+  "name": "test1",
+  "category": "Cloud",
+  "author": "Unknown",
+  "last_updated": "2026-04-15",
+  "priority": "Critical",
+  "estimated_hours": 1,
+  "mitre_techniques": [],
+  "prerequisites": [],
+  "required_tools": [],
+  "tags": [],
+  "references": [],
+  "hunt_actions": [],
+  "questions": []
+}

@@ -1,0 +1,77 @@
+{
+  "id": "mod_cloud_storage",
+  "name": "Cloud Storage Hunt",
+  "category": "Other",
+  "author": "Cloud Security Team",
+  "last_updated": "2026-04-15",
+  "priority": "High",
+  "estimated_hours": 3,
+  "mitre_techniques": [
+    "T1530",
+    "T1537",
+    "T1567.002"
+  ],
+  "prerequisites": [
+    "Read-only access to cloud storage APIs and audit logs",
+    "AWS CloudTrail / Azure Monitor / GCP Cloud Audit Logs enabled",
+    "SIEM ingesting cloud storage access events",
+    "Data classification inventory for sensitive buckets/containers"
+  ],
+  "required_tools": [
+    "AWS CLI / Azure CLI / gcloud CLI",
+    "CloudSploit or Prowler for misconfiguration scanning",
+    "Splunk or cloud-native SIEM (Sentinel Chronicle)",
+    "S3Scanner or CloudBrute (authorized enumeration)"
+  ],
+  "tags": [
+    "S3",
+    "Azure Blob",
+    "GCS",
+    "Cloud Storage",
+    "Data Lake",
+    "Exfiltration"
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1530/",
+    "https://attack.mitre.org/techniques/T1537/",
+    "https://github.com/sa7mon/S3Scanner"
+  ],
+  "hunt_actions": [
+    {
+      "title": "Misconfiguration and Public Exposure",
+      "actions": [
+        "Enumerate all S3 buckets and check public access block status: `aws s3api list-buckets --query 'Buckets[].Name' --output text | tr '\\t' '\\n' | xargs -I{} sh -c 'echo {}; aws s3api get-public-access-block --bucket {} 2>/dev/null || echo MISSING_BLOCK'` \u2014 any bucket without all four BlockPublicAcls, IgnorePublicAcls, BlockPublicPolicy, RestrictPublicBuckets set to true is at risk.",
+        "Check Azure Blob containers for anonymous access: `az storage account list --query '[].{name:name,rg:resourceGroup}' --output tsv | while IFS=$'\\t' read name rg; do az storage container list --account-name $name --query '[?properties.publicAccess!='none'].{container:name,access:properties.publicAccess}' --output tsv 2>/dev/null; done` \u2014 any container with publicAccess set to 'blob' or 'container' is publicly readable.",
+        "Scan GCS buckets for allUsers or allAuthenticatedUsers ACL entries: `gsutil ls -p <project_id> | xargs -I{} gsutil iam get {} | python3 -c 'import sys,json; d=json.load(sys.stdin); [print(b) for b in d.get(\"bindings\",[]) if any(m in [\"allUsers\",\"allAuthenticatedUsers\"] for m in b.get(\"members\",[]))]'`",
+        "Run Prowler for comprehensive cloud storage misconfiguration check: `prowler aws --checks s3_bucket_public_access s3_bucket_policy_public_write_access s3_bucket_no_mfa_delete s3_bucket_server_side_encryption_enabled s3_bucket_secure_transport_policy --output-formats json-ocsf --output-filename prowler_s3_$(date +%Y%m%d)` \u2014 review all FAIL findings immediately."
+      ]
+    },
+    {
+      "title": "Unauthorized Data Access and Exfiltration",
+      "actions": [
+        "Hunt for anonymous or unauthenticated downloads from S3: CloudTrail Athena query: `SELECT sourceipaddress, requestparameters, useridentity.type, COUNT(*) as cnt, SUM(CAST(additionaleventdata.bytestransferred AS BIGINT)) as bytes FROM cloudtrail_logs WHERE eventname='GetObject' AND useridentity.type='AWSService' OR useridentity.accountid IS NULL GROUP BY 1,2,3 HAVING bytes > 10485760 ORDER BY bytes DESC;` \u2014 unauthenticated access to sensitive buckets is immediately reportable.",
+        "Detect cross-account or cross-org object copies: `aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=CopyObject --start-time $(date -d '30 days ago' +%s) | jq '.Events[].CloudTrailEvent | fromjson | {time: .eventTime, src: .requestParameters.copySource, dest: .requestParameters.bucketName, user: .userIdentity.arn}'` \u2014 copies to buckets in external AWS accounts indicate potential data staging for exfiltration.",
+        "Hunt for high-volume object downloads by specific IAM principals: Splunk: `index=cloudtrail eventName=GetObject | iplocation sourceIPAddress | stats count as downloads, sum(additionalEventData.bytesTransferred) as bytes by useridentity.arn, sourceIPAddress, Country | sort -bytes | head 20` \u2014 focus on unknown countries and service accounts that do not normally access S3 at high volume.",
+        "Identify S3 Replication rules configured to external accounts: `aws s3api list-buckets --query 'Buckets[].Name' --output text | tr '\\t' '\\n' | xargs -I{} sh -c 'echo {}; aws s3api get-bucket-replication --bucket {} 2>/dev/null | jq .ReplicationConfiguration.Rules[].Destination'` \u2014 replication to a bucket in a different AWS account ID is a data exfiltration mechanism."
+      ]
+    },
+    {
+      "title": "Ransomware and Destructive Activity",
+      "actions": [
+        "Detect mass object deletion events in S3: Splunk: `index=cloudtrail eventName=DeleteObject OR eventName=DeleteObjects | stats count as deletions by useridentity.arn, requestParameters.bucketName | where deletions > 100 | sort -deletions` \u2014 also check for DeleteBucket events: `aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=DeleteBucket --output table`",
+        "Hunt for MFA-delete bypass attempts on versioned buckets: `aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=PutBucketVersioning | jq '.Events[].CloudTrailEvent | fromjson | select(.requestParameters.VersioningConfiguration.Status==\"Suspended\") | {time: .eventTime, user: .userIdentity.arn, bucket: .requestParameters.bucketName}'` \u2014 disabling versioning removes ransomware protection.",
+        "Identify encryption key deletion or disabling in KMS affecting storage: `aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=DisableKey | jq '.Events[].CloudTrailEvent | fromjson | {time:.eventTime, user:.userIdentity.arn, key:.requestParameters.keyId}'` and `aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=ScheduleKeyDeletion` \u2014 KMS key deletion renders all encrypted S3 objects permanently unrecoverable."
+      ]
+    }
+  ],
+  "questions": [
+    "Is the S3 Block Public Access setting enforced at the AWS Organization or account level via an SCP, ensuring no single bucket policy change can expose data publicly without an SCP override?",
+    "Is cloud storage access logging (S3 Server Access Logging or CloudTrail data events for S3) enabled for all buckets containing sensitive, regulated, or business-critical data?",
+    "Is there a current, maintained data classification inventory for all cloud storage resources, identifying which buckets/containers hold PII, PHI, financial, or classified data?",
+    "Is MFA-delete enabled on versioned S3 buckets containing critical data, and is the MFA device required for deletion held by an independent custodian separate from routine infrastructure administrators?",
+    "Are all objects in sensitive cloud storage buckets encrypted with customer-managed keys (AWS KMS CMK, Azure Key Vault, Cloud KMS), and is key access restricted to approved principals with key rotation enforced?",
+    "Are cloud storage lifecycle policies and replication rules documented and subject to change control, and is any replication to external accounts explicitly prohibited by policy and enforced via SCP or Deny policies?",
+    "Is cloud storage egress (downloads) monitored for anomalous volumes, and are alerts configured to fire when a single principal transfers more than a defined threshold (e.g., 10 GB) within a 24-hour window?",
+    "Are cloud storage vulnerability and misconfiguration scans (Prowler, AWS Config rules, Defender CSPM) run on a scheduled basis with findings tracked to resolution, and is this scanning scope inclusive of all accounts in the organization?"
+  ]
+}

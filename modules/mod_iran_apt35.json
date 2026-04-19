@@ -1,0 +1,68 @@
+{
+  "id": "mod_iran_apt35",
+  "name": "Iran APT35 — Charming Kitten / Phosphorus",
+  "category": "APT",
+  "tags": ["Iran", "APT35", "Charming Kitten", "Phosphorus", "TA453", "Credential Phishing"],
+  "author": "Threat Intelligence Team",
+  "last_updated": "2025-04-01",
+  "priority": "Critical",
+  "estimated_hours": 4,
+  "mitre_techniques": ["T1566.002", "T1539", "T1598.003", "T1021.001", "T1090.002", "T1056.001"],
+  "prerequisites": [
+    "Email gateway logs available with full header information",
+    "Azure AD / Google Workspace sign-in logs accessible",
+    "Browser extension audit capability on managed endpoints",
+    "MFA logs capturing authentication method type (SMS, app, hardware key)"
+  ],
+  "required_tools": [
+    "Microsoft 365 Defender Threat Explorer or equivalent",
+    "Azure AD Sign-in log analysis (Splunk or Sentinel)",
+    "Browser management console (Chrome Enterprise, Intune) for extension auditing",
+    "OSINT tools: Shodan, URLScan.io, VirusTotal"
+  ],
+  "references": [
+    "https://attack.mitre.org/groups/G0059/",
+    "https://blog.google/threat-analysis-group/new-campaign-targeting-security-researchers/",
+    "https://www.microsoft.com/en-us/security/blog/2022/09/14/microsoft-investigates-iranian-attacks-against-the-albanian-government/"
+  ],
+  "hunt_actions": [
+    {
+      "title": "Credential Phishing and Account Takeover Detection",
+      "actions": [
+        "Hunt for successful logins immediately after a password reset (APT35 resets passwords after credential phishing to lock out legitimate owner): `index=azure_ad OperationName='Change user password' | join UserPrincipalName [search index=azure_ad OperationName='User logged in' | where _time > relative_time(now(), '-1h')] | table _time, UserPrincipalName, IPAddress, Location, ResultDescription`",
+        "Detect impossible travel following credential theft: Sentinel KQL: `SigninLogs | where ResultType == 0 | summarize Locations=make_set(Location), IPs=make_set(IPAddress) by UserPrincipalName, bin(TimeGenerated, 1h) | where array_length(Locations) > 2 | project TimeGenerated, UserPrincipalName, Locations, IPs`"
+      ]
+    },
+    {
+      "title": "Malicious Browser Extension and Cookie Theft",
+      "actions": [
+        "Audit Chrome extensions for unauthorized installs (APT35 uses malicious extensions for cookie/session theft — HYPERSCRAPE): `Get-ItemProperty 'HKCU:\\Software\\Google\\Chrome\\Extensions\\*' | Select PSChildName, @{n='Path';e={$_.path}} | Export-Csv chrome_extensions.csv` — compare extension IDs against Chrome Web Store approved list; any extension loaded from a local path or unknown ID requires analysis",
+        "Hunt for browser session cookie theft indicators (new device login with session token after no credential prompt): Sentinel KQL: `SigninLogs | where AuthenticationRequirement == 'singleFactorAuthentication' and isnotempty(DeviceDetail.deviceId) | where DeviceDetail.deviceId !in (<approved_device_ids>) | project TimeGenerated, UserPrincipalName, DeviceDetail.displayName, IPAddress, Location`"
+      ]
+    },
+    {
+      "title": "HYPERSCRAPE Email Exfiltration Tool Detection",
+      "actions": [
+        "Hunt for HYPERSCRAPE indicators — it downloads Gmail/Yahoo/Outlook email via IMAP with specific user-agent patterns: `index=proxy OR index=network cs-user-agent IN (*Python*,*python-requests*,*libcurl*) cs-uri-stem IN (*mail.google.com*,*imap.gmail.com*,*imap.mail.yahoo.com*,*outlook.office365.com*) | stats count by src_ip, cs-user-agent, cs-uri-stem | sort -count` — programmatic IMAP/API mail access from unexpected IPs is a HYPERSCRAPE indicator",
+        "Detect unusual OAuth token grants for mail access: `AuditLogs | where OperationName == 'Consent to application' and TargetResources[0].type == 'ServicePrincipal' | where AdditionalDetails contains 'Mail.Read' or AdditionalDetails contains 'Mail.ReadAll' | project TimeGenerated, InitiatedBy.user.userPrincipalName, TargetResources[0].displayName, AdditionalDetails`"
+      ]
+    },
+    {
+      "title": "Infrastructure Reconnaissance and Pretexting",
+      "actions": [
+        "Hunt for APT35-linked infrastructure using passive DNS — known APT35 C2 domain patterns include free TLD abuse and typosquat on academic/news/government domains: Cross-reference outbound DNS queries against VirusTotal PDNS: `curl -s 'https://www.virustotal.com/api/v3/domains/<domain>/resolutions?limit=10' -H 'x-apikey: <key>' | jq '.data[].attributes | {ip_address, date: .date}'` — also check URLScan.io: `curl -s 'https://urlscan.io/api/v1/search/?q=domain:<domain>&size=10' -H 'API-Key: <key>'`",
+        "Detect LinkedIn and social media credential harvesting infrastructure (APT35 creates fake LinkedIn researcher profiles): Monitor for outbound connections to typosquat LinkedIn domains: `index=proxy cs-uri-stem=*linkedln* OR cs-uri-stem=*1inkedin* OR cs-uri-stem=*linked-in* | stats count by src_ip, cs-uri-stem | sort -count` — also alert on: connections to linke-din[.]com, linkedln[.]com or similar registered within last 30 days"
+      ]
+    }
+  ],
+  "questions": [
+    "Are all user accounts, especially those of executives, researchers, journalists, and policy staff, enrolled in phishing-resistant MFA (FIDO2/WebAuthn hardware keys or Microsoft Authenticator with number matching), rather than SMS-based MFA which APT35 is known to bypass via SIM swapping?",
+    "Is there a process for employees to report suspicious contact from unknown individuals on LinkedIn, WhatsApp, or Signal claiming to be researchers or journalists — a known APT35 pretexting vector?",
+    "Are browser extensions audited and allowlisted via endpoint management (Chrome Enterprise, Intune), with unauthorized extensions blocked from installation on managed devices?",
+    "Are OAuth application consent grants reviewed and restricted — is the user consent workflow blocked for apps requesting Mail.Read, Files.ReadAll, or other sensitive permissions, requiring admin approval instead?",
+    "Are Azure AD Conditional Access policies configured to block sign-ins from Tor exit nodes, VPN services, and hosting provider IP ranges commonly used by APT35 for anonymization?",
+    "Are IMAP and POP3 access to mailboxes blocked for standard users, with only approved clients using modern authentication permitted to access email programmatically?",
+    "Is there a threat intelligence subscription or ISAC membership providing timely notification of APT35/Charming Kitten infrastructure and IOC updates relevant to the organization's sector?",
+    "Are personnel in roles targeted by APT35 (academics, nuclear researchers, defense policy analysts, government officials) provided with additional security awareness training specific to nation-state social engineering techniques?"
+  ]
+}

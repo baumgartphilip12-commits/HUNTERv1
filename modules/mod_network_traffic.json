@@ -1,0 +1,56 @@
+{
+  "id": "mod_network_traffic",
+  "name": "Network Traffic Hunt",
+  "category": "Network",
+  "tags": ["Network", "DNS", "Zeek", "NetFlow", "C2", "Beaconing"],
+  "author": "Network Defense Team",
+  "last_updated": "2025-01-20",
+  "priority": "Medium",
+  "estimated_hours": 5,
+  "mitre_techniques": ["T1071", "T1572", "T1568", "T1048"],
+  "prerequisites": ["NetFlow v9/IPFIX or full PCAP available for hunt window", "DNS query logging enabled on resolvers", "Zeek or Suricata deployed at network boundary"],
+  "required_tools": ["Zeek / Suricata", "Wireshark / tshark", "Elastic / Arkime (Moloch)", "RITA (Real Intelligence Threat Analytics) for beaconing"],
+  "references": [
+    "https://attack.mitre.org/techniques/T1071/",
+    "https://zeek.org/documentation/",
+    "https://github.com/activecm/rita"
+  ],
+  "hunt_actions": [
+    {
+      "title": "Command and Control Detection",
+      "actions": [
+        "Hunt beaconing with RITA: `rita show-beacons <dataset> --limit 25 --human-readable` — review connections with Score > 0.7 and connection count > 50. Alternatively in Zeek conn.log: `cat conn.log | zeek-cut id.orig_h id.resp_h duration | sort | uniq -c | sort -rn | head -20` for repeated long-duration sessions.",
+        "Identify long-duration low-bandwidth sessions: `index=zeek sourcetype=zeek_conn | stats sum(bytes) as total_bytes, count as sessions, avg(duration) as avg_dur by src_ip, dest_ip | where avg_dur > 3600 AND total_bytes < 1048576 | sort -avg_dur` — sessions over 1 hour transferring less than 1 MB are suspicious.",
+        "Detect queries to newly registered domains (NRD): Use threat intel feed enrichment in Splunk: `index=dns | lookup nrd_lookup domain OUTPUT age | where age < 30 | stats count by query, answer, src_ip | sort -count` — or submit domains to https://whoisds.com/newly-registered-domains for manual lookups.",
+        "Hunt DNS over HTTPS (DoH) to unauthorized resolvers: `index=zeek sourcetype=zeek_conn dest_port=443 | lookup authorized_doh_resolvers dest_ip OUTPUT authorized | where isnull(authorized) | stats count by src_ip, dest_ip | sort -count` — known DoH providers: 1.1.1.1, 8.8.8.8, 9.9.9.9, 208.67.222.222."
+      ]
+    },
+    {
+      "title": "Data Exfiltration via Network",
+      "actions": [
+        "Detect large outbound transfers to single external host: `index=zeek sourcetype=zeek_conn direction=outbound | stats sum(bytes_out) as total_out by src_ip, dest_ip | where total_out > 1073741824 | sort -total_out` — flag any single-destination transfer over 1 GB; investigate the destination with WHOIS and reputation check.",
+        "Hunt DNS tunneling via oversized or high-entropy queries: In Zeek dns.log: `index=zeek sourcetype=zeek_dns | eval qlen=len(query) | where qlen > 50 | stats avg(qlen) as avg_len, count by src_ip, query | where count > 100 AND avg_len > 60` — also check for query types TXT, NULL, MX used for tunneling (iodine, dnscat2).",
+        "Identify ICMP tunneling via non-standard payloads: `tshark -r capture.pcap -Y 'icmp' -T fields -e ip.src -e ip.dst -e icmp.type -e data.len | awk '$4 > 64'` — standard ICMP echo is 32-64 bytes; larger payloads indicate potential tunneling (ptunnel, icmptunnel).",
+        "Detect FTP and uncommon protocol usage from internal hosts: `index=zeek sourcetype=zeek_conn dest_port IN (21, 69, 513, 514, 23, 119, 135, 137, 138, 139) | stats count by src_ip, dest_ip, dest_port | sort -count` — these protocols should appear in an approved baseline; any unlisted use requires investigation."
+      ]
+    },
+    {
+      "title": "Lateral Movement Indicators",
+      "actions": [
+        "Hunt SMB-based lateral movement: Windows Security Events 4648 (explicit creds) and 4624 Type 3 (network logon). Splunk: `index=windows EventCode=4648 TargetServerName!=localhost | table _time, host, SubjectUserName, TargetUserName, TargetServerName` — focus on source workstations authenticating to other workstations (not domain controllers).",
+        "Identify internal scanning behavior: `index=zeek sourcetype=zeek_conn | stats dc(dest_ip) as unique_dests count as attempts by src_ip, _time span=1h | where unique_dests > 50 | sort -unique_dests` — any internal host connecting to 50+ unique IPs in one hour is likely scanning; correlate with open ports to identify scan type.",
+        "Detect remote execution via PsExec, WMI, or DCOM: Sysmon Event 1 for PsExec (`Image=*psexec*` or `ParentImage=*services.exe* AND Image=*cmd.exe*`). For WMI lateral movement: Sysmon Event 20/21 (WmiEventConsumer). Splunk: `index=windows EventCode IN (4104,4688,1) (CommandLine=*psexec* OR CommandLine=*wmic* OR CommandLine=*winrm*) | table _time, host, CommandLine, ParentImage`"
+      ]
+    }
+  ],
+  "questions": [
+    "Is full packet capture (PCAP) available for the hunt period, or are only flow records (NetFlow/IPFIX) and metadata logs available? What is the capture point(s) in the network?",
+    "What is the retention period for network flow logs and PCAP, and does it cover the suspected compromise window for this engagement?",
+    "Are Zeek or Suricata signatures current (updated within the last 7 days), and are rulesets tuned to suppress known-good traffic baselines specific to this environment?",
+    "Does the organization have a documented network traffic baseline defining normal traffic patterns, volumes, and authorized external communications for key host groups?",
+    "Are outbound firewall egress rules enforced with an explicit deny-all default, or is outbound traffic permissive by default?",
+    "Is DNS query logging enabled on all internal resolvers, including split-horizon or forwarder configurations, and are logs forwarded to the SIEM?",
+    "Is there a documented allowlist of authorized external egress points (proxies, VPN exit nodes, SaaS endpoints) that can be used to filter known-good traffic during the hunt?",
+    "Is network segmentation enforced between IT and OT/ICS networks, and are cross-segment communication rules documented and access-controlled?"
+  ]
+}

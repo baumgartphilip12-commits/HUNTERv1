@@ -1,0 +1,56 @@
+{
+  "id": "mod_linux_server",
+  "name": "Linux Server Hunt",
+  "category": "Endpoint",
+  "tags": ["Linux", "SSHD", "Auditd", "Cron", "Rootkit"],
+  "author": "Infrastructure Security",
+  "last_updated": "2025-03-01",
+  "priority": "High",
+  "estimated_hours": 4,
+  "mitre_techniques": ["T1053.003", "T1098", "T1070.002", "T1543.002"],
+  "prerequisites": ["Auditd installed and collecting on all targets", "Root or sudo privilege for artifact collection", "SSH key-based access to target systems", "OSQuery agent deployed (preferred)"],
+  "required_tools": ["Auditd / ausearch / aureport", "OSQuery or Velociraptor Linux artifact", "chkrootkit / rkhunter", "Lynis hardening auditor"],
+  "references": [
+    "https://attack.mitre.org/techniques/T1053/003/",
+    "https://cisofy.com/lynis/",
+    "https://github.com/Invoke-IR/PowerForensics"
+  ],
+  "hunt_actions": [
+    {
+      "title": "Unauthorized Account and Privilege Escalation",
+      "actions": [
+        "Review /etc/passwd for unexpected accounts: `awk -F: '$3 >= 1000 && $7 != \"/sbin/nologin\" && $7 != \"/bin/false\" {print $1, $3, $6, $7}' /etc/passwd` — compare output against approved user list; any unknown UID >= 1000 with a valid shell warrants investigation.",
+        "Detect SUID/SGID binaries added outside package manager: `find / -xdev \\( -perm -4000 -o -perm -2000 \\) -type f -print0 2>/dev/null | xargs -0 ls -la | sort` — compare against a known-good baseline: `rpm -Va --nodigest 2>/dev/null | grep '^.M'` (RPM) or `dpkg --verify 2>/dev/null | grep 'not installed\\|MD5 mismatch'` (Debian).",
+        "Hunt for sudo rule modifications: `find /etc/sudoers /etc/sudoers.d/ -newer /var/log/apt/history.log -ls 2>/dev/null` and `aureport --auth -ts today` — review any rule granting NOPASSWD or ALL=(ALL) to non-standard accounts. Also check: `visudo -c` for syntax errors that may indicate injection.",
+        "Identify SSH authorized_keys additions: `find /root /home -name authorized_keys -newer /etc/passwd -ls 2>/dev/null` and `ausearch -k auth -ts today | grep authorized_keys` — each new key entry should correspond to an approved provisioning event."
+      ]
+    },
+    {
+      "title": "Persistence via Cron and Services",
+      "actions": [
+        "Audit all cron jobs across system and user crontabs: `for f in /etc/cron.d/* /etc/cron.daily/* /etc/cron.hourly/* /etc/cron.weekly/* /etc/cron.monthly/*; do echo \"=== $f ===\"; cat $f 2>/dev/null; done` and `for u in $(cut -f1 -d: /etc/passwd); do echo \"=== $u ===\"; crontab -l -u $u 2>/dev/null; done` — any script referencing /tmp, /dev/shm, or curl/wget is suspicious.",
+        "Detect systemd units added outside package management: `find /etc/systemd/system /usr/local/lib/systemd /run/systemd/system -name '*.service' -newer /usr/lib/systemd -ls 2>/dev/null` — inspect suspicious unit files with `systemctl cat <unit>` and verify the ExecStart binary is signed and expected.",
+        "Review /etc/rc.local and init.d for unauthorized scripts: `cat /etc/rc.local 2>/dev/null; ls -la /etc/init.d/ | sort -k6,7` — compare init.d modification dates against known deployment dates. Any recently modified init script must be reviewed line-by-line.",
+        "Hunt for LD_PRELOAD abuse: `grep -r 'LD_PRELOAD\\|LD_LIBRARY_PATH' /etc/environment /etc/profile /etc/profile.d/ /etc/ld.so.preload /home/*/.bashrc /home/*/.bash_profile /root/.bashrc 2>/dev/null` — LD_PRELOAD pointing to an unknown .so file indicates potential rootkit or hijacking."
+      ]
+    },
+    {
+      "title": "Log Tampering and Defense Evasion",
+      "actions": [
+        "Identify gaps or deletions in auth logs: `ausearch -m USER_LOGIN -ts $(date -d '30 days ago' +%m/%d/%Y) | grep -c 'type=USER_LOGIN'` then compare count against expected baseline. Also: `find /var/log -name 'auth.log*' -o -name 'secure*' | xargs ls -lh` — look for zero-byte log files or unexpected gaps in inode modification time.",
+        "Detect shell history clearing: `ausearch -k historian -ts today 2>/dev/null` (if auditd watches history files) or `find /home /root -name '.bash_history' -empty -o -name '.bash_history' -newer /etc/passwd | xargs ls -lh 2>/dev/null` — also check for `HISTFILE=/dev/null` or `unset HISTFILE` in shell rc files.",
+        "Hunt for use of shred, wipe, dd, or truncate on log files: `ausearch -x shred -ts today 2>/dev/null; ausearch -x wipe -ts today 2>/dev/null; grep -r 'truncate\\|shred\\|dd if=/dev/null' /var/log/syslog /var/log/messages 2>/dev/null` — also examine: `ausearch -f /var/log -ts today | grep -E 'UNLINK|RENAME'` for log file deletions."
+      ]
+    }
+  ],
+  "questions": [
+    "Is auditd installed, actively running, and configured with a hardened ruleset (e.g., STIG or CIS Level 2 audit rules) on all in-scope Linux systems?",
+    "Are auditd logs forwarded in real time to a central SIEM, and what is the maximum acceptable log forwarding lag before an alert is triggered?",
+    "Are all in-scope servers enrolled in a configuration management system (Ansible, Puppet, Chef, or Salt), and can the system generate a diff against the last known-good configuration state?",
+    "Is SSH hardened on all systems to prohibit root login (PermitRootLogin no), enforce public key authentication only (PasswordAuthentication no), and use a non-standard port or port knocking?",
+    "Is an endpoint telemetry agent (OSQuery, Velociraptor, or equivalent) deployed and actively collecting process, network, file integrity, and user session data?",
+    "Are file integrity monitoring (FIM) tools (AIDE, Tripwire, or Wazuh FIM) deployed and running on schedule, with baseline databases stored offline or read-only?",
+    "Is there a documented and approved list of expected cron jobs, systemd timers, and services for each server role, against which deviations can be measured?",
+    "Are privileged accounts (root, service accounts with sudo) managed through a Privileged Access Management (PAM) solution (e.g., CyberArk, HashiCorp Vault) with session recording?"
+  ]
+}

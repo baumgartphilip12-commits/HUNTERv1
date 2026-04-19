@@ -1,0 +1,56 @@
+{
+  "id": "mod_email_phishing",
+  "name": "Email and Phishing Hunt",
+  "category": "Network",
+  "tags": ["Email", "Phishing", "SMTP", "O365", "Exchange", "BEC"],
+  "author": "Threat Intelligence Team",
+  "last_updated": "2025-03-12",
+  "priority": "High",
+  "estimated_hours": 3,
+  "mitre_techniques": ["T1566", "T1534", "T1114", "T1048.002"],
+  "prerequisites": ["Exchange Admin or Global Reader role for message trace access", "Microsoft 365 Defender or Proofpoint / Mimecast admin access", "Email gateway (MTA) log access for the hunt window"],
+  "required_tools": ["Microsoft 365 Compliance Center (Message Trace)", "Microsoft Defender for Office 365 Threat Explorer", "Splunk with O365 Management Activity log index", "PhishTank / URLScan.io / VirusTotal for URL analysis"],
+  "references": [
+    "https://attack.mitre.org/techniques/T1566/",
+    "https://learn.microsoft.com/en-us/microsoft-365/security/office-365-security/",
+    "https://www.cisa.gov/sites/default/files/2023-08/CISA-Guide-to-Responding-to-Phishing-Attacks.pdf"
+  ],
+  "hunt_actions": [
+    {
+      "title": "Phishing Campaign Detection",
+      "actions": [
+        "Search for phishing emails using Microsoft 365 Threat Explorer: Navigate to https://security.microsoft.com > Email & Collaboration > Explorer > filter by Detection Technology = Anti-phishing, Anti-malware, or URL detonation > set time range to hunt window > group by SenderDomain > export to CSV. Review sender domains for typosquatting or newly registered domains.",
+        "Hunt for emails with malicious URLs that bypassed ATP: `Connect-ExchangeOnline; Search-UnifiedAuditLog -RecordType ThreatIntelligence -Operations AtpDetection -StartDate '2025-01-01' -EndDate '2025-04-01' | ConvertFrom-Json | Select CreationDate, UserIds, AuditData | Export-Csv atp_detections.csv` — also submit clicked URLs to URLScan.io: `curl -s -X POST https://urlscan.io/api/v1/scan/ -H 'API-Key: <key>' -d '{\"url\":\"<url>\",\"visibility\":\"private\"}'`",
+        "Identify email addresses targeted in the same phishing campaign: `Search-UnifiedAuditLog -RecordType ThreatIntelligence -StartDate '2025-03-01' -EndDate '2025-04-01' | ForEach { $a=ConvertFrom-Json $_.AuditData; $a } | Group-Object SenderAddress | Sort Count -Desc | Select -First 20 | Select Name, Count` — a single sender targeting multiple internal recipients indicates a campaign.",
+        "Check for homograph and lookalike domain abuse in email headers: `Get-MessageTrace -StartDate '2025-03-01' -EndDate '2025-04-01' -PageSize 5000 | Where-Object { $_.SenderAddress -notmatch '@approvedomain\\.com' } | Select-Object Received, SenderAddress, RecipientAddress, Subject | Export-Csv external_senders.csv` — then visually inspect sender domains for Unicode lookalikes or character substitution."
+      ]
+    },
+    {
+      "title": "Business Email Compromise (BEC) Indicators",
+      "actions": [
+        "Hunt for inbox rules forwarding email externally: `Get-InboxRule -Mailbox <user> | Where-Object { $_.ForwardTo -or $_.ForwardAsAttachmentTo -or $_.RedirectTo } | Select Name, ForwardTo, ForwardAsAttachmentTo, RedirectTo` — or for all mailboxes: `Get-Mailbox -ResultSize Unlimited | ForEach { Get-InboxRule -Mailbox $_.UserPrincipalName | Where-Object { $_.ForwardTo -or $_.RedirectTo } | Select Mailbox:$_.UserPrincipalName, Name, ForwardTo, RedirectTo }`. Any external forwarding rule is a critical finding.",
+        "Detect mailbox delegation or full access permissions added: `Get-MailboxPermission -Identity <mailbox> | Where-Object { $_.AccessRights -contains 'FullAccess' -and $_.IsInherited -eq $false -and $_.User -notlike 'NT AUTHORITY*' }` — and: `Get-RecipientPermission -Identity <mailbox> | Where-Object { $_.Trustee -ne 'NT AUTHORITY\\SELF' }` for SendAs permissions. Audit log: `Search-UnifiedAuditLog -Operations 'Add-MailboxPermission' -StartDate '2025-01-01'`",
+        "Hunt for email exfiltration to personal accounts: Splunk: `index=o365 Operation=Send | where tostring(recipients{}) match '(@gmail\\.com|@yahoo\\.com|@protonmail\\.com|@outlook\\.com)' AND isnotnull(itemSubject) | stats count by userPrincipalName, recipients | sort -count` — executive mailboxes sending to personal email domains require immediate investigation.",
+        "Identify spoofed internal sender domains not failing SPF/DKIM/DMARC: `Get-MessageTrace -StartDate '2025-03-01' -EndDate '2025-04-01' | Where-Object { $_.SenderAddress -match '@yourdomain\\.com' -and $_.FromIP -notmatch '<your_mail_server_IP_range>' } | Select SenderAddress, RecipientAddress, FromIP, Subject` — internal domain spoofing from external IPs that passes anti-spoofing indicates misconfigured SPF records."
+      ]
+    },
+    {
+      "title": "Malicious Attachment Analysis",
+      "actions": [
+        "Pull quarantined messages with malicious attachments from Defender: `Get-QuarantineMessage -QuarantineTypes Malware -StartReceivedDate '2025-03-01' -EndReceivedDate '2025-04-01' | Select SenderAddress, RecipientAddress, Subject, Received, QuarantineTypes | Export-Csv quarantine_malware.csv` — extract attachment hashes and submit to VirusTotal: `curl -s 'https://www.virustotal.com/api/v3/files/<sha256>' -H 'x-apikey: <key>' | jq '.data.attributes.last_analysis_stats'`",
+        "Hunt for macro-enabled Office documents delivered via email: In Defender Threat Explorer filter by Attachment File Type = .xlsm, .docm, .xltm, .pptm, .xlam within the hunt window. Also: `Search-UnifiedAuditLog -Operations 'FileDownloaded,FileAccessed' | Where-Object { $_.AuditData -match '\\.(xlsm|docm|pptm|xlam)' }` — document when these were opened and by whom.",
+        "Identify HTML smuggling attacks (large HTML attachments): `Get-MessageTraceDetail -MessageTraceId <id> | Where-Object { $_.Detail -match 'HTML attachment' }` — or filter email gateway logs for attachments with .html or .htm extension > 50KB. Submit suspicious HTML files to `urlscan.io` or analyze with `grep -oP 'atob\\(.*?\\)' suspicious.html` to find base64-encoded payloads inside."
+      ]
+    }
+  ],
+  "questions": [
+    "Are Microsoft Defender for Office 365 Plan 2 (or equivalent) Safe Links and Safe Attachments policies enabled for all users, including shared mailboxes and distribution groups?",
+    "Are SPF, DKIM, and DMARC records published and enforced (DMARC policy set to p=quarantine or p=reject) for all sending domains, including subdomain and third-party sending service domains?",
+    "Is the Microsoft 365 Unified Audit Log enabled for all users, and are audit logs retained for a minimum of 180 days (requires E3/E5 or the Purview Audit Standard license)?",
+    "Is there a documented and tested phishing reporting mechanism for end users (e.g., Microsoft Report Message add-in, KnowBe4 PAB), and are reported messages triaged by the security team within a defined SLA?",
+    "Are inbox rules monitored for external forwarding configurations on a scheduled basis, and is an alert configured in Defender or Sentinel to fire when a new external forwarding rule is created?",
+    "Has executive leadership (CEO, CFO, General Counsel) been enrolled in targeted anti-phishing policy with stricter thresholds in Defender for Office 365 to account for Business Email Compromise targeting?",
+    "Are all email-sending third-party services (marketing platforms, HR systems, ticketing tools) authorized via SPF include statements and DKIM key delegation, with the full inventory documented?",
+    "Is user security awareness training conducted at a minimum annually with phishing simulation exercises, and are click rates tracked and used to target remedial training for high-risk users?"
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "id": "mod_windows_endpoint",
+  "name": "Windows Endpoint Hunt",
+  "category": "Endpoint",
+  "tags": ["Windows", "EDR", "Sysmon", "PowerShell", "LSASS"],
+  "author": "Red Cell Team",
+  "last_updated": "2025-03-15",
+  "priority": "High",
+  "estimated_hours": 6,
+  "mitre_techniques": ["T1059.001", "T1053.005", "T1547.001", "T1055"],
+  "prerequisites": ["Sysmon deployed with baseline config (SwiftOnSecurity recommended)", "EDR telemetry available and actively collecting", "PowerShell ScriptBlock logging GPO enabled", "Remote access via WinRM or EDR console"],
+  "required_tools": ["Velociraptor or CrowdStrike Falcon", "Splunk or Elastic with Windows Event Log index", "Sysmon Event Logs (Sysmon operational channel)"],
+  "references": [
+    "https://attack.mitre.org/techniques/T1059/001/",
+    "https://github.com/SwiftOnSecurity/sysmon-config"
+  ],
+  "hunt_actions": [
+    {
+      "title": "Malicious PowerShell Execution",
+      "actions": [
+        "Hunt for PowerShell spawned by Office applications: Windows Event 4688 or Sysmon Event 1. Splunk: `index=windows (EventCode=4688 OR EventCode=1) ParentImage IN (*WINWORD.EXE*,*EXCEL.EXE*,*OUTLOOK.EXE*) Image=*powershell* | table _time, host, ParentImage, Image, CommandLine`",
+        "Detect encoded command-line executions: `index=windows EventCode=4688 CommandLine=*-EncodedCommand* OR CommandLine=*-enc* | rex field=CommandLine '-[Ee][Nn][Cc][Oo]?[Dd]?[Ee]?[Dd]? (?P<encoded>[A-Za-z0-9+/=]+)' | eval decoded=base64decode(encoded) | table _time, host, decoded` — decode and inspect for IEX, Net.WebClient, or download cradles.",
+        "Identify PowerShell downloading from internet: Windows PowerShell ScriptBlock log (Event 4104). Splunk: `index=windows EventCode=4104 (ScriptBlockText=*DownloadString* OR ScriptBlockText=*IEX* OR ScriptBlockText=*Invoke-Expression* OR ScriptBlockText=*WebClient*) | table _time, host, ScriptBlockText`",
+        "Hunt for AMSI bypass strings: `index=windows EventCode=4104 (ScriptBlockText=*amsiInitFailed* OR ScriptBlockText=*AmsiScanBuffer* OR ScriptBlockText=*amsiContext* OR ScriptBlockText=*Reflection.Assembly*) | table _time, host, Path, ScriptBlockText`"
+      ]
+    },
+    {
+      "title": "Persistence via Registry and Scheduled Tasks",
+      "actions": [
+        "Review Run/RunOnce keys for unsigned binaries: Sysmon Event 13 (RegistryValueSet). Splunk: `index=windows EventCode=13 TargetObject IN (*\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run*,*\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce*) | table _time, host, TargetObject, Details` — then validate each binary path with `Get-AuthenticodeSignature <path>`.",
+        "Audit scheduled tasks created in last 30 days: On endpoint run `schtasks /query /fo CSV /v | ConvertFrom-Csv | Where-Object { $_.Status -ne 'Disabled' -and $_.'Run As User' -eq 'SYSTEM' } | Select TaskName, 'Task To Run', 'Run As User'` or Velociraptor: `SELECT * FROM Artifact.Windows.System.ScheduledTasks() WHERE Principal.UserId = 'S-1-5-18'`",
+        "Hunt WMI event subscriptions: `Get-WMIObject -Namespace root\\subscription -Class __EventFilter | Select Name, Query` and `Get-WMIObject -Namespace root\\subscription -Class CommandLineEventConsumer | Select Name, CommandLineTemplate` — any result is suspicious unless tied to known software (AV/EDR).",
+        "Detect services installed outside deployment windows: Windows Event 7045 (new service installed). Splunk: `index=windows EventCode=7045 | eval day_of_week=strftime(_time,'%A') | where day_of_week!='Tuesday' AND day_of_week!='Wednesday' | table _time, host, ServiceName, ImagePath, AccountName` — adjust patch window days to match your environment."
+      ]
+    },
+    {
+      "title": "Process Injection Indicators",
+      "actions": [
+        "Hunt for unusual parent-child process relationships: Sysmon Event 1. Splunk: `index=windows EventCode=1 (ParentImage=*winword.exe* OR ParentImage=*excel.exe*) Image IN (*cmd.exe*,*powershell.exe*,*wscript.exe*,*cscript.exe*,*mshta.exe*,*regsvr32.exe*) | table _time, host, ParentImage, Image, CommandLine`",
+        "Detect CreateRemoteThread (DLL injection): Sysmon Event 8. Splunk: `index=windows EventCode=8 TargetImage!=*svchost.exe* | table _time, host, SourceImage, TargetImage, StartAddress, StartModule` — review any SourceImage that does not normally inject (non-AV/EDR processes).",
+        "Identify processes with unexpected network connections: Sysmon Event 3 (Network Connect). Splunk: `index=windows EventCode=3 Image IN (*notepad.exe*,*calc.exe*,*mspaint.exe*,*wordpad.exe*) | table _time, host, Image, DestinationIp, DestinationPort` — static apps should never initiate outbound connections."
+      ]
+    }
+  ],
+  "questions": [
+    "Is Sysmon deployed on all endpoints with a hardened configuration (e.g., SwiftOnSecurity or Olaf Hartong Modular Config), and what is the current config version/hash?",
+    "Which EDR platform is deployed, and is it operating in active prevention mode or detection-only (audit) mode across all endpoint populations?",
+    "Is PowerShell ScriptBlock logging (Event 4104) and Module logging (Event 4103) enabled organization-wide via Group Policy, and are these logs forwarded to the SIEM?",
+    "Are Windows Defender or third-party AV exclusions formally documented, approved by a security authority, and reviewed at least quarterly for scope creep?",
+    "What is the current endpoint patch compliance rate, and what percentage of endpoints are within 30 days of the latest OS and third-party application security patches?",
+    "Is Windows Event Log forwarding (WEF) or an EDR agent configured to centrally ship Security, System, and Application event logs to a SIEM, and what is the maximum ingest lag?",
+    "Are privileged administrative accounts (local admin, domain admin) separated from day-to-day user accounts, and is there a Privileged Access Workstation (PAW) or jump server policy in place?",
+    "Is LSA Protection (RunAsPPL) or Windows Credential Guard enabled to prevent LSASS memory dumping, and has this been verified via `Get-ItemProperty HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Lsa -Name RunAsPPL`?"
+  ]
+}
